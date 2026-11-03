@@ -1,0 +1,20 @@
+# Python / Pytest
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# ROS 2 Colcon build artifacts
+build/
+install/
+log/
+
+# Local archives / temporary files
+*.zip
+windows_workspace
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*~
