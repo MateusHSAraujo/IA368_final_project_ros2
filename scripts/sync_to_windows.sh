@@ -1,41 +1,21 @@
 #!/usr/bin/env bash
+# Copies the Windows-side helper scripts (scripts/*.ps1) from this WSL repository to the
+# Windows master copy. Nothing else is copied: the Unity project, the CoppeliaSim scripts,
+# the scenes and the planning documents are owned by the Windows repository
+# (IA368_final_project) and must never be overwritten from here.
 set -euo pipefail
 
-WSL_ROOT="/home/mateus/ia368/projeto_final"
+WSL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WIN_ROOT="/mnt/c/Users/mateu/unicamp/IA368/projeto_final"
 
-mkdir -p "${WIN_ROOT}/Assets/Scripts/Layer1_SimulatedWorld_ZMQ" \
-         "${WIN_ROOT}/Assets/Scripts/Layer2_ARInterface_ROS2" \
-         "${WIN_ROOT}/coppelia_scripts" \
-         "${WIN_ROOT}/scene_house" \
-         "${WIN_ROOT}/scripts"
+shopt -s nullglob
+ps1_files=("${WSL_ROOT}/scripts/"*.ps1)
 
-if [ -d "${WSL_ROOT}/unity_scripts" ]; then
-    cp -r "${WSL_ROOT}/unity_scripts/"* "${WIN_ROOT}/Assets/Scripts/" 2>/dev/null || true
+if [ ${#ps1_files[@]} -eq 0 ]; then
+    echo "No scripts/*.ps1 to sync."
+    exit 0
 fi
 
-if [ -d "${WSL_ROOT}/coppelia_scripts" ]; then
-    cp -r "${WSL_ROOT}/coppelia_scripts/"* "${WIN_ROOT}/coppelia_scripts/" 2>/dev/null || true
-fi
-
-if [ -f "${WSL_ROOT}/PROPOSTA_PROJETO.md" ]; then
-    cp -u "${WSL_ROOT}/PROPOSTA_PROJETO.md" "${WIN_ROOT}/" 2>/dev/null || true
-    cp -u "${WSL_ROOT}/PROPOSTA_PROJETO.md" "${WIN_ROOT}/My project/" 2>/dev/null || true
-fi
-
-if [ -f "${WSL_ROOT}/PLANO_IMPLEMENTACAO.md" ]; then
-    cp -u "${WSL_ROOT}/PLANO_IMPLEMENTACAO.md" "${WIN_ROOT}/" 2>/dev/null || true
-    cp -u "${WSL_ROOT}/PLANO_IMPLEMENTACAO.md" "${WIN_ROOT}/My project/" 2>/dev/null || true
-fi
-
-if [ -f "${WSL_ROOT}/scene_house/scene_house.ttt" ]; then
-    cp -u "${WSL_ROOT}/scene_house/scene_house.ttt" "${WIN_ROOT}/scene_house/" 2>/dev/null || true
-    mkdir -p "${WIN_ROOT}/My project/scene_house"
-    cp -u "${WSL_ROOT}/scene_house/scene_house.ttt" "${WIN_ROOT}/My project/scene_house/" 2>/dev/null || true
-fi
-
-if [ -d "${WSL_ROOT}/scripts" ]; then
-    cp -r "${WSL_ROOT}/scripts/"*.ps1 "${WIN_ROOT}/scripts/" 2>/dev/null || true
-fi
-
-echo "Sincronizado com sucesso para ${WIN_ROOT} (C:\\Users\\mateu\\unicamp\\IA368\\projeto_final)"
+mkdir -p "${WIN_ROOT}/scripts"
+cp -u "${ps1_files[@]}" "${WIN_ROOT}/scripts/"
+echo "Synced ${#ps1_files[@]} PowerShell script(s) to ${WIN_ROOT}/scripts"
