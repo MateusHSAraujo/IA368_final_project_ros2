@@ -13,7 +13,7 @@ These three files are **symlinks into `windows_workspace/`** (the Windows reposi
 Everything committed is in **English**: code, comments, log strings, documentation, file and folder names, and commit messages.
 
 ## Division of work
-- **Windows agent (Claude Code on Windows)**, repo `IA368_final_project`: Unity project (`My project/`), CoppeliaSim scripts (`coppelia_scripts/`), scenes (`scene_house/*.ttt`, Git LFS), PowerShell scripts and the planning documents. Stage 1 is done.
+- **Windows agent (Claude Code on Windows)**, repo `IA368_final_project`: Unity project (`My project/`), CoppeliaSim scripts (`coppelia_scripts/`), scenes (`scene_house/*.ttt`), PowerShell scripts and the planning documents. Stage 1 is done.
 - **You (WSL)**: `ros2_ws/`, `tests/`, `scripts/*.sh` (and `scripts/*.ps1` authored here, mirrored to Windows by `scripts/sync_to_windows.sh`).
 - `sync_to_windows.sh` copies **only** `scripts/*.ps1`. Never copy documents, C#, Lua or scenes to Windows: Windows is their master copy.
 
