@@ -31,6 +31,7 @@ The Windows folder is reachable from here through the `windows_workspace` symlin
 ├── PROJECT_PROPOSAL.md      -> windows_workspace/PROJECT_PROPOSAL.md     (symlink)
 ├── IMPLEMENTATION_PLAN.md   -> windows_workspace/IMPLEMENTATION_PLAN.md  (symlink)
 ├── STAGE1_UNITY_PLAN.md     -> windows_workspace/STAGE1_UNITY_PLAN.md    (symlink)
+├── STAGE4_VR_LOCOMOTION_PLAN.md -> windows_workspace/STAGE4_VR_LOCOMOTION_PLAN.md (symlink)
 ├── ros2_ws/                 # ROS 2 Jazzy workspace (vr_robot_pkg and ROS-TCP-Endpoint)
 ├── scripts/                 # Automation scripts (sync_to_windows.sh, network helpers)
 └── tests/                   # Offline automated tests in Python (pytest)

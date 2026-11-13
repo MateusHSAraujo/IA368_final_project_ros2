@@ -6,8 +6,9 @@ You are the **WSL agent (Claude Code on WSL2, Ubuntu 24.04)**. This repository (
 - `IMPLEMENTATION_PLAN.md`: stage-by-stage plan. Section 2.4 lists the open architecture items for Stages 3–6 (e.g. ROS-TCP-Connector is not an Action client; Nav2 has no native Pause/Resume; the Keepout Filter needs `costmap_filter_info_server` and a `transient_local` mask).
 - `PROJECT_PROPOSAL.md`: overview.
 - `STAGE1_UNITY_PLAN.md`: what the Windows agent built in Stage 1 (CoppeliaSim → Unity converter) and its status.
+- `STAGE4_VR_LOCOMOTION_PLAN.md`: what the Windows agent built in Stage 4 part 1 (VR locomotion, VR menu, start flow) and its status. Not needed for the ROS work.
 
-These three files are **symlinks into `windows_workspace/`** (the Windows repository `IA368_final_project`, mounted at `/mnt/c/Users/mateu/unicamp/IA368/projeto_final`). There is a single copy of each document: if you edit them, the change lands in the Windows repository. Do not commit the Windows repository from WSL (Git over `/mnt/c` is slow and mixes line endings/permissions); tell the user which documents you changed so they are committed on Windows.
+These four files are **symlinks into `windows_workspace/`** (the Windows repository `IA368_final_project`, mounted at `/mnt/c/Users/mateu/unicamp/IA368/projeto_final`). There is a single copy of each document: if you edit them, the change lands in the Windows repository. Do not commit the Windows repository from WSL (Git over `/mnt/c` is slow and mixes line endings/permissions); tell the user which documents you changed so they are committed on Windows.
 
 ## Language
 Everything committed is in **English**: code, comments, log strings, documentation, file and folder names, and commit messages.
