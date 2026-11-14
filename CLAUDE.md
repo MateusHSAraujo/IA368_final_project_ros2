@@ -42,7 +42,7 @@ Everything committed is in **English**: code, comments, log strings, documentati
 ## Status
 - Stages 2 and 3 done (2026-11-13), validated live against `scene_house.ttt`. Contract for Stages 5–6: `ros2_ws/src/vr_robot_pkg/README.md`.
 - Stage 5 ROS side done (2026-11-14): `mission_supervisor_node` (the only node Unity talks to: `/hmi/goal`, `/hmi/path`, `/hmi/mission_cmd`, `/hmi/keepout_stroke`, `/hmi/map_cmd` → `/hmi/mission_state`, `/hmi/map_state`), replacing `keepout_mask_node`. Saved maps in `maps/` (reference `scene_house`); `map:=scene_house` loads it at startup. Next on this side: twist_mux (Stage 6, `sudo apt install ros-jazzy-twist-mux`).
-- `scene_house.ttt` was saved on Windows (2026-11-13) with `/myRobot`, `/myRobot/frontCamera`, respondable house shapes, real-time mode and the depth-camera laser v2. Scene changes made through the Remote API live only in memory until the user saves the scene in CoppeliaSim.
+- `scene_house.ttt` was saved on Windows (2026-11-13) with `/myRobot`, `/myRobot/frontCamera`, respondable house shapes, real-time mode and the depth-camera laser v2.  On 2026-11-14 the unused sweep-laser parts (`LaserScannerBody_2D`, joint, proximity sensor, graph) were removed in memory; `/myRobot/LaserScanner_2D` (invisible, holds the laser script with `remoteExchange`), `Laserscanner_ref` and the two depth sensors stay. Scene changes made through the Remote API live only in memory until the user saves the scene in CoppeliaSim.
 
 ## ROS-side practical lessons
 - `ament_python` + `--symlink-install`: Python modules and config/launch files are **copied** into `install/`; rebuild after every change before a live run (pytest imports `src/` through `tests/conftest.py`, so it can pass on stale installs).

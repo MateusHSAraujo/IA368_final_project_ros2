@@ -171,6 +171,9 @@ def uninstall(sim):
     laser = sim.getObject(LASER_PATH)
     script = sim.getScript(sim.scripttype_childscript, laser)
     original = sim.readCustomStringData(laser, 'originalLaserScript')
+    if original and sim.getObject(LASER_PATH + '/LaserScannerJoint_2D', {'noError': True}) == -1:
+        sys.exit('The sweep joint and proximity sensor were removed from this scene (only the depth '
+                 'laser is kept): the original laser script cannot run. Reload an older scene instead.')
     if original:
         sim.setScriptStringParam(script, sim.scriptstringparam_text, original)
         sim.writeCustomStringData(laser, 'originalLaserScript', '')
