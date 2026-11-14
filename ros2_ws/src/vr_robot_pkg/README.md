@@ -1,6 +1,6 @@
 # vr_robot_pkg
 
-ROS 2 Jazzy package of the IA368 final project (ROS 2 side, WSL2). It bridges CoppeliaSim to ROS 2, builds the Nav2 keepout mask, and brings up SLAM, Nav2 and the ROS-TCP-Endpoint that Unity connects to.
+ROS 2 Jazzy package of the IA368 final project (ROS 2 side, WSL2). It bridges CoppeliaSim to ROS 2, runs the mission supervisor (missions, keepout zones, saved maps), and brings up SLAM, Nav2 and the ROS-TCP-Endpoint that Unity connects to.
 
 This file is also the **interface contract** for the Unity side (ROS-TCP-Connector, Stages 5 and 6). Sections marked **RESERVED** are fixed contracts whose ROS-side implementation does not exist yet.
 
@@ -11,7 +11,7 @@ This file is also the **interface contract** for the Unity side (ROS-TCP-Connect
 | Component | Role |
 |---|---|
 | `coppelia_bridge` | CoppeliaSim ZMQ Remote API (Windows host, port 23000) <-> ROS: scan, odom, TF, camera, `cmd_vel`. |
-| `keepout_mask_node` | Publishes `/keepout_filter_mask` (transient_local); accepts debug polygons on `/keepout_mask_test`. |
+| `mission_supervisor` | The only node Unity talks to for missions, keepout zones and saved maps. Only Nav2 action client; publishes `/keepout_filter_mask`; client of the slam_toolbox map services. |
 | `costmap_filter_info_server` + `lifecycle_manager_costmap_filters` | Nav2 Keepout Filter plumbing (started 3 s late on purpose). |
 | slam_toolbox (online async) | Mapping; publishes `/map` and `map -> odom`. |
 | Nav2 `navigation_launch.py` | Started after `nav2_delay` (8 s). |
@@ -36,6 +36,20 @@ ros2 launch vr_robot_pkg vr_robot_bringup.launch.py mock_mode:=true
 ```
 
 Note: for this ament_python package, `config/` and `launch/` files are COPIED at build time. Rebuild after editing them.
+
+### Presentation quick start
+
+```bash
+ros2 launch vr_robot_pkg vr_robot_bringup.launch.py map:=scene_house
+```
+
+The full house map is on `/map` a few seconds after startup, with no manual driving.
+
+To rebuild the reference map: drive or explore the house, then save it:
+
+```bash
+ros2 topic pub --once /hmi/map_cmd std_msgs/msg/String "{data: 'SAVE scene_house'}"
+```
 
 ## Scene preparation (CoppeliaSim)
 
@@ -62,12 +76,14 @@ Without `remoteExchange` the bridge falls back to individual calls (a few Hz).
 | `use_tcp_endpoint` | `true` | ROS-TCP-Endpoint. |
 | `tcp_port` | `10000` | Endpoint port. |
 | `use_rviz` | `false` | RViz. |
+| `map` | `''` | Saved map to load at startup, e.g. `map:=scene_house`. Empty = map from scratch. The supervisor waits for odometry, slam_toolbox and a first `/map`, then loads it. |
+| `maps_dir` | `''` | Saved maps folder. Empty = `<repo>/maps`. |
 
 ## Interface contract
 
 ### Frames
 
-`map` (slam_toolbox) -> `odom` (= CoppeliaSim world; `map -> odom` starts as identity, so map is approximately the CoppeliaSim/Unity origin, and may drift slightly as SLAM corrects) -> `base_link` (`/myRobot/Ground_truth`, on the floor plane, yaw only) -> `laser_link` (0.0778, 0, 0.2498), `camera_link` (about (0.20, 0, 0.219), tilted 10 deg down) -> `camera_optical_frame`.
+`map` (slam_toolbox) -> `odom` (= CoppeliaSim world; `map -> odom` is identity: odometry is ground truth, so slam_toolbox runs with scan matching and loop closing off and builds the map from the exact poses. The `map` frame therefore IS the CoppeliaSim/Unity world frame, also for loaded maps) -> `base_link` (`/myRobot/Ground_truth`, on the floor plane, yaw only) -> `laser_link` (0.0778, 0, 0.2498), `camera_link` (about (0.20, 0, 0.219), tilted 10 deg down) -> `camera_optical_frame`.
 
 Robot: Pioneer P3-DX, wheel radius 0.0975 m, wheelbase 0.331 m, half-width about 0.21 m. Start pose (2.9, 2.125), yaw 0.
 
@@ -94,23 +110,56 @@ Robot: Pioneer P3-DX, wheel radius 0.0975 m, wheelbase 0.331 m, half-width about
 | `/camera/enable` | `std_msgs/Bool` | - | publish | `true` when the teleop panel opens, `false` when it closes. Camera is disabled by default. |
 | `/cmd_vel` | `geometry_msgs/Twist` | - | publish (Stage 3 testing only) | `linear.x` m/s, `angular.z` rad/s. Bridge watchdog stops the robot 0.5 s after the last message: publish at >= 10 Hz. Nav2 also publishes here while navigating (collision_monitor). Stage 6 inserts `twist_mux`; Unity must then publish on `/cmd_vel_teleop` instead. |
 | `/myRobot/bridge_status` | `std_msgs/String` | - | subscribe | `connected` / `waiting-for-simulation` / `disconnected` / `mock`. Republished every 1 s (also transient_local). |
-| `/keepout_filter_mask` | `nav_msgs/OccupancyGrid` | `map` | subscribe (optional) | transient_local. Fixed grid: resolution 0.05, origin (-2.5, -4.25), 310 x 210 cells (house bounding box); 100 = keepout. Published by `keepout_mask_node` now; the Stage 5 supervisor will own it. **Unity must NOT publish it** (ROS-TCP-Endpoint cannot publish transient_local). |
-| `/keepout_mask_test` | `geometry_msgs/PolygonStamped` | `map` | debug only | Input of `keepout_mask_node`: polygon in meters, cumulative; empty polygon clears. `Point32` fields must be floats. |
+| `/keepout_filter_mask` | `nav_msgs/OccupancyGrid` | `map` | subscribe (optional) | transient_local. Fixed grid: resolution 0.05, origin (-2.5, -4.25), 310 x 210 cells (house bounding box); 100 = keepout. Published by `mission_supervisor`. **Unity must NOT publish it** (ROS-TCP-Endpoint cannot publish transient_local). |
+| `/keepout_mask_test` | `geometry_msgs/PolygonStamped` | `map` | debug only | Debug input of `mission_supervisor`: polygon in meters, cumulative; empty polygon clears everything. Not saved with maps. `Point32` fields must be floats. |
 
-Nav2 actions `/navigate_to_pose` and `/navigate_through_poses` exist, but Unity cannot call ROS actions through ROS-TCP-Connector: use the reserved `/hmi` topics below.
+Nav2 actions `/navigate_to_pose` and `/navigate_through_poses` exist, but Unity cannot call ROS actions through ROS-TCP-Connector: use the `/hmi` topics below.
 
-Keepout note: Nav2 does not inflate keepout cells, so the robot body (half-width 0.21 m) can overlap a zone edge. The Stage 5 supervisor will dilate painted strokes by the robot radius.
+Keepout note: Nav2 does not inflate keepout cells, so the robot body (half-width 0.21 m) can overlap a zone edge. The supervisor dilates painted strokes by `robot_half_width` (0.21 m).
 
-### RESERVED for Stages 5/6 (contract fixed now, ROS side NOT implemented yet)
+### HMI topics (mission supervisor)
+
+Implemented by `mission_supervisor`. Unity is the only client; the supervisor is the only Nav2 action client.
 
 | Topic | Type | Direction | Contract |
 |---|---|---|---|
-| `/hmi/goal` | `geometry_msgs/PoseStamped` (`map`) | Unity -> supervisor | Point-and-click goal -> NavigateToPose. |
-| `/hmi/path` | `nav_msgs/Path` (`map`) | Unity -> supervisor | Painted path; the supervisor subsamples to waypoints (>= 0.3 m apart) -> NavigateThroughPoses. |
-| `/hmi/mission_cmd` | `std_msgs/String` | Unity -> supervisor | `PAUSE` / `RESUME` / `CANCEL`. Nav2 has no native pause: the supervisor cancels and stores the remaining poses. |
-| `/hmi/mission_state` | `std_msgs/String` (JSON) | supervisor -> Unity | On change and at 1 Hz: `{"state": "IDLE"\|"NAVIGATING"\|"PAUSED"\|"SUCCEEDED"\|"FAILED"\|"CANCELED", "mode": "goal"\|"path"\|null, "remaining": n, "message": "..."}` |
-| `/hmi/keepout_stroke` | `geometry_msgs/PolygonStamped` (`map`) | Unity -> supervisor | One painted stroke = ordered points (`x`, `y` in meters, `z` = brush radius in meters). Cumulative; a message with zero points clears all zones. The supervisor rasterizes into `/keepout_filter_mask` (dilated by robot half-width). |
-| `/cmd_vel_teleop` | `geometry_msgs/Twist` | Unity -> `twist_mux` | Higher priority than Nav2. >= 10 Hz while the deadman (grip) is held; stop publishing to release. The supervisor auto-pauses an active mission when teleop starts. |
+| `/hmi/goal` | `geometry_msgs/PoseStamped` (`map`) | Unity -> supervisor | Point-and-click goal -> NavigateToPose. If the quaternion is all zeros, the goal faces the direction of travel from the robot. The header stamp is ignored (the latest transform is used). |
+| `/hmi/path` | `nav_msgs/Path` (`map`) | Unity -> supervisor | Painted path -> NavigateThroughPoses. Thinned to waypoints >= 0.3 m apart (parameter `waypoint_spacing`): points within 0.3 m of the robot at the start are skipped, the final point is always the last waypoint, and each waypoint faces the next one. |
+| `/hmi/mission_cmd` | `std_msgs/String` | Unity -> supervisor | `PAUSE` / `RESUME` / `CANCEL`. Nav2 has no native pause: PAUSE cancels the Nav2 goal and stores the remaining poses; RESUME resends them. Unknown commands only change `message`. |
+| `/hmi/mission_state` | `std_msgs/String` (JSON) | supervisor -> Unity | Published on change and every 1 s. QoS transient_local (volatile subscribers such as ROS-TCP-Endpoint get the 1 s republish). `{"state": "IDLE"\|"NAVIGATING"\|"PAUSED"\|"SUCCEEDED"\|"FAILED"\|"CANCELED", "mode": "goal"\|"path"\|null, "remaining": n, "message": "..."}` |
+| `/hmi/keepout_stroke` | `geometry_msgs/PolygonStamped` (`map`) | Unity -> supervisor | One painted stroke = ordered points (`x`, `y` in meters, `z` = brush radius in meters). Dilated by `robot_half_width` (0.21 m). Consecutive points are joined by capsules, so the brush is continuous between points. Cumulative; a message with zero points clears all zones. Rasterized into `/keepout_filter_mask`; saved with maps. |
+| `/hmi/map_cmd` | `std_msgs/String` | Unity -> supervisor | `SAVE <name>` / `LOAD <name>` / `RESET`. Names `[A-Za-z0-9_-]{1,40}`. SAVE overwrites. RESET = slam_toolbox reset: mapping restarts from scratch and keepout zones are cleared. Commands sent while another map operation is running are rejected (`ok=false`). |
+| `/hmi/map_state` | `std_msgs/String` (JSON) | supervisor -> Unity | Published on change and every 1 s, transient_local: `{"state": "READY"\|"BUSY", "map": "<name>"\|null, "maps": ["scene_house", ...], "ok": true\|false, "message": "..."}`. `map` = last saved/loaded map; `maps` = maps available on disk; `ok`/`message` = result of the last command. |
+
+Mission behaviour:
+
+| Situation | Behaviour |
+|---|---|
+| PAUSE | Cancels the Nav2 goal. Stores the remaining poses: path = the last `remaining` waypoints from Nav2 feedback; goal = the goal. `message`: `paused (operator)`. |
+| Teleop | A nonzero Twist on `/cmd_vel_teleop` (\|linear.x\| or \|angular.z\| > 0.01) auto-pauses an active mission. `message`: `paused (teleop)`. |
+| RESUME | Resends the stored poses. |
+| CANCEL | Works from NAVIGATING or PAUSED. `message`: `canceled by operator`. |
+| New goal or path | While NAVIGATING or PAUSED, replaces the mission. |
+| `remaining` | Poses left while NAVIGATING, stored poses while PAUSED, else 0. |
+
+Example `message` values: `goal reached`, `paused (operator)`, `paused (teleop)`, `canceled by operator`, `map loaded`, `navigation failed: ...`, `Nav2 action server /navigate_to_pose not available`.
+
+### Saved maps
+
+| Item | Behaviour |
+|---|---|
+| Folder | `<repo>/maps/` (committed; found from the install path in `<repo>/ros2_ws/install/...`). Launch arg `maps_dir:=<path>` overrides; fallback `~/.ros/vr_robot_maps` if the repo cannot be found. |
+| Reference map | `scene_house`: the whole house. |
+| LOAD | Cancels any active mission (`message`: `map loaded`). Calls slam_toolbox deserialize at the robot's current odom pose: odometry is ground truth and `map -> odom` starts as identity, so a saved map frame equals the world frame and no relocalization is needed. Restores the keepout zones saved with the map. slam_toolbox keeps mapping on top of the loaded map; the full map shows on `/map` within about 5 s (`map_update_interval`). |
+| SAVE files | `<name>.posegraph` + `<name>.data` (slam_toolbox pose graph, what LOAD uses); `<name>.pgm` + `<name>.yaml` (map image, nav2 map_server format, written from the last `/map`); `<name>.keepout.json` (keepout strokes). |
+
+slam_toolbox's own `/slam_toolbox/save_map` service fails in this setup (its map_saver times out waiting for `/map`); the supervisor writes the image itself.
+
+### RESERVED for Stage 6 (contract fixed now, ROS side NOT implemented yet)
+
+| Topic | Type | Direction | Contract |
+|---|---|---|---|
+| `/cmd_vel_teleop` | `geometry_msgs/Twist` | Unity -> `twist_mux` | Higher priority than Nav2. >= 10 Hz while the deadman (grip) is held; stop publishing to release. The supervisor already auto-pauses an active mission when a nonzero Twist arrives here (see Mission behaviour). `twist_mux` priority routing is Stage 6. |
 
 ## Networking
 
@@ -146,9 +195,12 @@ ROS-TCP-Connector handshake: endpoint v0.7.0, protocol ROS2.
 ## Verification
 
 ```bash
-pytest tests/        # 54 offline tests: math, network scripts, keepout mask, bridge in mock mode
+pytest tests/        # 197 offline tests: math, network scripts, keepout mask, map store, mission logic,
+                     # bridge in mock mode, mission supervisor (mock Nav2 and slam_toolbox)
 # Live (stack running against CoppeliaSim):
 python3 -u tests/live/check_live_stack.py rates drive camera keepout nav through map \
     --zone 2.4 -0.4 0.4 --goal 2.4 -1.5 --goal 3.3 -1.7 --goal 6.2 0.7
+python3 -u tests/live/check_live_stack.py hmi_goal hmi_path hmi_pause hmi_keepout hmi_map \
+    --goal 2.4 -1.5 --goal 3.3 -1.7 --zone 2.4 -0.4 0.3
 python3 -u tests/live/check_tcp_endpoint.py   # acts like Unity through port 10000
 ```

@@ -1,4 +1,8 @@
 # slam_toolbox parameters, from the IA368 class workspace (validated with the P3-DX in CoppeliaSim).
+# Odometry is CoppeliaSim ground truth, so scan matching and loop closing are OFF: the map is built
+# from the exact poses and map -> odom stays at identity (map frame == world == Unity frame, and
+# saved maps stay in world coordinates). With them on, a bad match during a long exploration
+# shifted map -> odom by 2.2 m / 19 deg.
 slam_toolbox:
   ros__parameters:
 
@@ -39,7 +43,7 @@ slam_toolbox:
     enable_interactive_mode: true
 
     # General Parameters
-    use_scan_matching: true
+    use_scan_matching: false
     use_scan_barycenter: true
     minimum_travel_distance: 0.5
     minimum_travel_heading: 0.5
@@ -48,7 +52,7 @@ slam_toolbox:
     link_match_minimum_response_fine: 0.1  
     link_scan_maximum_distance: 1.5
     loop_search_maximum_distance: 3.0
-    do_loop_closing: true 
+    do_loop_closing: false 
     loop_match_minimum_chain_size: 10           
     loop_match_maximum_variance_coarse: 3.0  
     loop_match_minimum_response_coarse: 0.35    

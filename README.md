@@ -33,8 +33,9 @@ The Windows folder is reachable from here through the `windows_workspace` symlin
 ├── STAGE1_UNITY_PLAN.md     -> windows_workspace/STAGE1_UNITY_PLAN.md    (symlink)
 ├── STAGE4_VR_LOCOMOTION_PLAN.md -> windows_workspace/STAGE4_VR_LOCOMOTION_PLAN.md (symlink)
 ├── ros2_ws/src/
-│   ├── vr_robot_pkg/        # Bridge, keepout mask, configs, bringup launch; README = ROS interface contract
+│   ├── vr_robot_pkg/        # Bridge, mission supervisor, configs, bringup launch; README = ROS interface contract
 │   └── ROS-TCP-Endpoint/    # git submodule (Unity-Technologies, main-ros2)
+├── maps/                    # Saved SLAM maps (pose graph, map image, keepout strokes); scene_house = reference map of the house
 ├── scripts/
 │   ├── get_windows_host_ip.sh   # Windows host IP for CoppeliaSim (--check PORT)
 │   ├── setup_adb_reverse.ps1    # Quest 3 adb reverse / portproxy (mirrored to Windows)
@@ -45,13 +46,14 @@ The Windows folder is reachable from here through the `windows_workspace` symlin
 
 ## Status and quick start
 
-Stages 2 and 3 are done: the Pioneer P3-DX in `scene_house.ttt` runs with SLAM, Nav2 (with keepout filter), a compressed front camera and ROS-TCP-Endpoint on port 10000. See [`ros2_ws/src/vr_robot_pkg/README.md`](ros2_ws/src/vr_robot_pkg/README.md) for the interface contract used by Unity.
+Stages 2 and 3 are done, and the ROS side of Stage 5 is done: the Pioneer P3-DX in `scene_house.ttt` runs with SLAM, Nav2 (with keepout filter), a compressed front camera and ROS-TCP-Endpoint on port 10000. The mission supervisor handles point-and-click and path missions with pause/resume, keepout brush zones, and saved maps that can be loaded from Unity or at startup with `map:=scene_house`. See [`ros2_ws/src/vr_robot_pkg/README.md`](ros2_ws/src/vr_robot_pkg/README.md) for the interface contract used by Unity.
 
 ```bash
 git submodule update --init
 source /opt/ros/jazzy/setup.bash
 cd ros2_ws && colcon build --symlink-install && source install/setup.bash
 ros2 launch vr_robot_pkg vr_robot_bringup.launch.py          # CoppeliaSim on Windows with scene_house.ttt open
+ros2 launch vr_robot_pkg vr_robot_bringup.launch.py map:=scene_house  # same, starting with the saved house map on /map
 ros2 launch vr_robot_pkg vr_robot_bringup.launch.py mock_mode:=true   # without CoppeliaSim
 cd .. && pytest tests/
 ```

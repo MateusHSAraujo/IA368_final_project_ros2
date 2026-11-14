@@ -40,7 +40,8 @@ Everything committed is in **English**: code, comments, log strings, documentati
 - A Ctrl-C during a pending request leaves the REQ socket unusable: do cleanup over a fresh client.
 
 ## Status
-- Stages 2 and 3 done (2026-11-13), validated live against `scene_house.ttt`. Contract for Stages 5–6: `ros2_ws/src/vr_robot_pkg/README.md`. Next on this side: mission supervisor (Stage 5) and twist_mux (Stage 6, `sudo apt install ros-jazzy-twist-mux`).
+- Stages 2 and 3 done (2026-11-13), validated live against `scene_house.ttt`. Contract for Stages 5–6: `ros2_ws/src/vr_robot_pkg/README.md`.
+- Stage 5 ROS side done (2026-11-14): `mission_supervisor_node` (the only node Unity talks to: `/hmi/goal`, `/hmi/path`, `/hmi/mission_cmd`, `/hmi/keepout_stroke`, `/hmi/map_cmd` → `/hmi/mission_state`, `/hmi/map_state`), replacing `keepout_mask_node`. Saved maps in `maps/` (reference `scene_house`); `map:=scene_house` loads it at startup. Next on this side: twist_mux (Stage 6, `sudo apt install ros-jazzy-twist-mux`).
 - `scene_house.ttt` was saved on Windows (2026-11-13) with `/myRobot`, `/myRobot/frontCamera`, respondable house shapes, real-time mode and the depth-camera laser v2. Scene changes made through the Remote API live only in memory until the user saves the scene in CoppeliaSim.
 
 ## ROS-side practical lessons
@@ -48,7 +49,9 @@ Everything committed is in **English**: code, comments, log strings, documentati
 - Processes started in the background from a non-interactive shell inherit SIGINT as ignored: start `ros2 launch` through a wrapper that restores `SIG_DFL`, stop it with one SIGINT to the launch process, and never `pkill -f` a pattern contained in your own command line.
 - `tf2_ros.TransformListener(spin_thread=True)` spins the whole node in a second executor (timers included): don't use it in nodes with blocking timers.
 - Publishers created right before publishing lose messages until discovery matches: wait for `get_subscription_count() > 0`. A stale ROS daemon hides topics: `ros2 daemon stop`.
-- Live checks: `tests/live/check_live_stack.py` and `tests/live/check_tcp_endpoint.py` (not collected by pytest).
+- Live checks: `tests/live/check_live_stack.py` (incl. the `hmi_*` steps) and `tests/live/check_tcp_endpoint.py` (not collected by pytest).
+- In a shell, `a && b && cmd &` backgrounds the whole `&&` list as one subshell, so `$!` is not the launch PID: start `ros2 launch` as its own statement before recording `$!`. A stray live stack makes the mock-mode tests fail (same topics, DDS domain 0).
+- Saved maps: slam_toolbox `serialize_map`/`deserialize_map` (START_AT_GIVEN_POSE at the odom pose) work in async mode; ground-truth odom makes the saved map frame the world frame. slam_toolbox runs with `use_scan_matching: false` and `do_loop_closing: false` (a bad match during a long exploration had shifted `map -> odom` by 2.2 m / 19°); keep them off so `map` == world == Unity. `/slam_toolbox/save_map` fails (its map_saver times out on `/map`): `map_store.write_map_image` writes the PGM/YAML instead.
 
 ## Verification
 `colcon build --symlink-install` in `ros2_ws`, `pytest tests/` (offline, incl. the bridge in mock mode), mock action servers for Nav2 actions, and the live checks above when CoppeliaSim is available. ROS 2 Jazzy: `source /opt/ros/jazzy/setup.bash`.

@@ -23,12 +23,12 @@ setup(
     maintainer='Mateus Henrique Silva Araujo',
     maintainer_email='mateusaraujopro2001@gmail.com',
     description=('ROS 2 side of the IA368 mixed-reality HMI: CoppeliaSim bridge '
-                 'for the Pioneer P3-DX, SLAM, Nav2 with keepout filter'),
+                 'for the Pioneer P3-DX, SLAM, Nav2 with keepout filter, mission supervisor'),
     license='Apache-2.0',
     entry_points={
         'console_scripts': [
             'coppelia_bridge_node = vr_robot_pkg.coppelia_bridge_node:main',
-            'keepout_mask_node = vr_robot_pkg.keepout_mask_node:main',
+            'mission_supervisor_node = vr_robot_pkg.mission_supervisor_node:main',
         ],
     },
 )

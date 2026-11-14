@@ -1,7 +1,6 @@
 import math
 import os
 import sys
-import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 '..', 'ros2_ws', 'src', 'vr_robot_pkg'))
@@ -77,79 +76,134 @@ def test_occupancy_data():
     assert sum(data) == 200
 
 
-# ---------------------------------------------------------------- ROS part
-rclpy = pytest.importorskip('rclpy')
-try:
-    from geometry_msgs.msg import Point32, PolygonStamped
-    from nav_msgs.msg import OccupancyGrid
-    from rclpy.executors import SingleThreadedExecutor
-    from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile,
-                           ReliabilityPolicy)
-    from vr_robot_pkg.keepout_mask_node import KeepoutMaskNode
-    HAVE_ROS = True
-except ImportError:
-    HAVE_ROS = False
-
-ros_only = pytest.mark.skipif(not HAVE_ROS, reason='ROS messages unavailable')
+def _cell_value(m, x, y):
+    col, row = km.world_to_cell(SPEC, x, y)
+    return m[row, col]
 
 
-def _spin_until(ex, cond, timeout=3.0):
-    end = time.time() + timeout
-    while time.time() < end and not cond():
-        ex.spin_once(timeout_sec=0.05)
-    return cond()
+def _brute_stroke(points, dilation):
+    """Reference stroke on the full grid, without bounding-box windows."""
+    xs = SPEC.origin_x + (np.arange(SPEC.width) + 0.5) * SPEC.resolution
+    ys = SPEC.origin_y + (np.arange(SPEC.height) + 0.5) * SPEC.resolution
+    gx, gy = np.meshgrid(xs, ys)
+    radii = [max(float(r), 0.0) + dilation for _, _, r in points]
+    if len(points) == 1:
+        segments = [(points[0], points[0], radii[0])]
+    else:
+        segments = [(points[i], points[i + 1], max(radii[i], radii[i + 1]))
+                    for i in range(len(points) - 1)]
+    hit = np.zeros(gx.shape, dtype=bool)
+    for (ax, ay, _), (bx, by, _), r in segments:
+        dx, dy = bx - ax, by - ay
+        length2 = dx * dx + dy * dy
+        if length2 > 0:
+            t = np.clip(((gx - ax) * dx + (gy - ay) * dy) / length2, 0.0, 1.0)
+        else:
+            t = 0.0
+        px = ax + t * dx
+        py = ay + t * dy
+        hit |= (gx - px) ** 2 + (gy - py) ** 2 <= r ** 2
+    out = np.zeros(gx.shape, dtype=np.int8)
+    out[hit] = 100
+    return out
 
 
-@ros_only
-def test_node_publishes_and_updates():
-    rclpy.init()
-    ex = SingleThreadedExecutor()
-    node = KeepoutMaskNode()
-    helper = rclpy.create_node('keepout_test_helper_%d' % os.getpid())
-    try:
-        ex.add_node(node)
-        ex.add_node(helper)
-        # Let the node publish before the subscriber exists (late subscriber).
-        for _ in range(5):
-            ex.spin_once(timeout_sec=0.05)
+def test_capsule_horizontal_segment():
+    m = km.empty_mask(SPEC)
+    n = km.rasterize_capsule(m, SPEC, (0.0, 0.0), (2.0, 0.0), 0.3)
+    expected = (2.0 * 0.3 * 2 + math.pi * 0.3 ** 2) / 0.0025
+    assert abs(n - expected) / expected < 0.05
+    assert int((m == 100).sum()) == n
+    # Middle of the segment and points well inside the radius are set.
+    assert _cell_value(m, 1.0, 0.0) == 100
+    assert _cell_value(m, 1.0, 0.2) == 100
+    # Points beyond the radius are not set.
+    assert _cell_value(m, 1.0, 0.4) == 0
+    assert _cell_value(m, 2.6, 0.0) == 0
+    # Just past an endpoint, but within the radius, is set (rounded end).
+    assert _cell_value(m, 2.2, 0.0) == 100
+    assert _cell_value(m, -0.2, 0.0) == 100
+    # A corner-like point at the end is outside a round cap.
+    assert _cell_value(m, -0.25, 0.25) == 0
 
-        got = []
-        qos = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=1,
-                         reliability=ReliabilityPolicy.RELIABLE,
-                         durability=DurabilityPolicy.TRANSIENT_LOCAL)
-        helper.create_subscription(
-            OccupancyGrid, '/keepout_filter_mask', got.append, qos)
-        pub = helper.create_publisher(
-            PolygonStamped, '/keepout_mask_test', 10)
 
-        assert _spin_until(ex, lambda: len(got) >= 1)
-        g = got[-1]
-        assert g.info.width == 310 and g.info.height == 210
-        assert g.info.resolution == pytest.approx(0.05)
-        assert g.header.frame_id == 'map'
-        assert len(g.data) == 310 * 210
-        assert all(v == 0 for v in g.data)
+def test_capsule_degenerate_equals_disc():
+    m1 = km.empty_mask(SPEC)
+    m2 = km.empty_mask(SPEC)
+    n1 = km.rasterize_capsule(m1, SPEC, (5.0, 0.0), (5.0, 0.0), 0.5)
+    n2 = km.rasterize_disc(m2, SPEC, 5.0, 0.0, 0.5)
+    assert n1 == n2 > 0
+    assert np.array_equal(m1, m2)
 
-        # Wait for node to see the publisher's subscription.
-        assert _spin_until(ex, lambda: pub.get_subscription_count() > 0)
 
-        n_before = len(got)
-        sq = PolygonStamped()
-        sq.header.frame_id = 'map'
-        sq.polygon.points = [Point32(x=float(x), y=float(y), z=0.0)
-                             for x, y in [(0, 0), (1, 0), (1, 1), (0, 1)]]
-        pub.publish(sq)
-        assert _spin_until(ex, lambda: len(got) > n_before)
-        assert sum(1 for v in got[-1].data if v == 100) == 400
+def test_capsule_zero_radius_sets_nothing():
+    m = km.empty_mask(SPEC)
+    assert km.rasterize_capsule(m, SPEC, (0.0, 0.0), (1.0, 0.0), 0.0) == 0
+    assert km.rasterize_capsule(m, SPEC, (0.0, 0.0), (1.0, 0.0), -0.5) == 0
+    assert not m.any()
 
-        n_before = len(got)
-        empty = PolygonStamped()
-        empty.header.frame_id = 'map'
-        pub.publish(empty)
-        assert _spin_until(ex, lambda: len(got) > n_before)
-        assert all(v == 0 for v in got[-1].data)
-    finally:
-        ex.shutdown()
-        node.destroy_node()
-        helper.destroy_node()
-        rclpy.shutdown()
+
+def test_stroke_single_point_equals_disc():
+    m1 = km.empty_mask(SPEC)
+    m2 = km.empty_mask(SPEC)
+    n = km.rasterize_stroke(m1, SPEC, [(5.0, 0.0, 0.3)], dilation=0.1)
+    km.rasterize_disc(m2, SPEC, 5.0, 0.0, 0.4)
+    assert n == int((m2 == 100).sum()) > 0
+    assert np.array_equal(m1, m2)
+
+
+def test_stroke_dilation_covers_more_cells():
+    pts = [(0.0, 0.0, 0.2), (1.0, 0.0, 0.2), (1.0, 1.0, 0.2)]
+    m1 = km.empty_mask(SPEC)
+    m2 = km.empty_mask(SPEC)
+    n1 = km.rasterize_stroke(m1, SPEC, pts)
+    n2 = km.rasterize_stroke(m2, SPEC, pts, dilation=0.1)
+    assert n2 > n1 > 0
+    assert (m1 <= m2).all()
+    assert int((m2 == 100).sum()) > int((m1 == 100).sum())
+
+
+def test_stroke_l_shape_covers_corner_and_legs():
+    m = km.empty_mask(SPEC)
+    km.rasterize_stroke(m, SPEC, [(0.0, 0.0, 0.1), (2.0, 0.0, 0.1),
+                                  (2.0, 2.0, 0.1)])
+    assert _cell_value(m, 2.0, 0.0) == 100  # corner
+    assert _cell_value(m, 1.0, 0.0) == 100  # horizontal leg
+    assert _cell_value(m, 2.0, 1.0) == 100  # vertical leg
+    assert _cell_value(m, 1.0, 1.0) == 0    # inside the L, away from strokes
+
+
+def test_stroke_empty_points():
+    m = km.empty_mask(SPEC)
+    assert km.rasterize_stroke(m, SPEC, []) == 0
+    assert not m.any()
+
+
+def test_stroke_fully_outside_grid():
+    m = km.empty_mask(SPEC)
+    assert km.rasterize_stroke(m, SPEC, [(100.0, 100.0, 0.5),
+                                         (101.0, 100.0, 0.5)]) == 0
+    assert km.rasterize_stroke(m, SPEC, [(-50.0, 0.0, 0.5)],
+                               dilation=0.2) == 0
+    assert not m.any()
+
+
+def test_stroke_count_is_newly_set_cells():
+    pts = [(-1.0, -1.0, 0.2), (0.0, 0.0, 0.3), (1.5, 0.5, 0.1)]
+    m = km.empty_mask(SPEC)
+    first = km.rasterize_stroke(m, SPEC, pts)
+    assert first > 0
+    assert first == int((m == 100).sum())
+    assert km.rasterize_stroke(m, SPEC, pts) == 0
+
+
+def test_stroke_bbox_matches_brute_force():
+    rng = np.random.default_rng(7)
+    n = 60
+    xs = np.linspace(-2.4, 12.9, n) + rng.normal(0.0, 0.15, n)
+    ys = np.linspace(-4.2, 6.2, n) + rng.normal(0.0, 0.15, n)
+    rs = rng.uniform(0.05, 0.4, n)
+    pts = list(zip(xs.tolist(), ys.tolist(), rs.tolist()))
+    m = km.empty_mask(SPEC)
+    km.rasterize_stroke(m, SPEC, pts, dilation=0.05)
+    assert np.array_equal(m, _brute_stroke(pts, 0.05))

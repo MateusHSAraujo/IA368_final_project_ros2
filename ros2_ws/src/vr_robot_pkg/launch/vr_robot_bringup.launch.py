@@ -1,8 +1,9 @@
-"""Bringup for the Pioneer P3-DX digital twin: CoppeliaSim bridge, keepout filter,
-slam_toolbox, Nav2 and ROS-TCP-Endpoint (Unity).
+"""Bringup for the Pioneer P3-DX digital twin: CoppeliaSim bridge, mission supervisor
+(missions, keepout filter mask, saved maps), slam_toolbox, Nav2 and ROS-TCP-Endpoint (Unity).
 
 Examples:
     ros2 launch vr_robot_pkg vr_robot_bringup.launch.py
+    ros2 launch vr_robot_pkg vr_robot_bringup.launch.py map:=scene_house
     ros2 launch vr_robot_pkg vr_robot_bringup.launch.py mock_mode:=true use_rviz:=true
     ros2 launch vr_robot_pkg vr_robot_bringup.launch.py coppelia_host:=172.23.224.1 use_nav2:=false
 """
@@ -32,6 +33,8 @@ def generate_launch_description():
     use_tcp_endpoint = LaunchConfiguration('use_tcp_endpoint')
     tcp_port = LaunchConfiguration('tcp_port')
     use_rviz = LaunchConfiguration('use_rviz')
+    map_name = LaunchConfiguration('map')
+    maps_dir = LaunchConfiguration('maps_dir')
 
     args = [
         DeclareLaunchArgument('mock_mode', default_value='false',
@@ -50,6 +53,11 @@ def generate_launch_description():
                               description='Start ROS-TCP-Endpoint for Unity'),
         DeclareLaunchArgument('tcp_port', default_value='10000'),
         DeclareLaunchArgument('use_rviz', default_value='false'),
+        DeclareLaunchArgument('map', default_value='',
+                              description='Saved map to load at startup (e.g. scene_house); '
+                                          'empty = map from scratch'),
+        DeclareLaunchArgument('maps_dir', default_value='',
+                              description='Saved maps folder; empty = <repo>/maps'),
     ]
 
     bridge = Node(
@@ -65,13 +73,15 @@ def generate_launch_description():
         }],
     )
 
-    # Keepout filter: mask publisher (Stage 5 supervisor replaces it) + filter info server.
-    keepout_mask = Node(
+    # Mission supervisor: Nav2 action client for Unity, keepout mask publisher, saved maps.
+    supervisor = Node(
         package='vr_robot_pkg',
-        executable='keepout_mask_node',
-        name='keepout_mask_node',
+        executable='mission_supervisor_node',
+        name='mission_supervisor',
         output='screen',
+        parameters=[{'initial_map': map_name, 'maps_dir': maps_dir}],
     )
+    # Keepout filter plumbing (the mask itself comes from the supervisor).
     filter_info_server = Node(
         package='nav2_map_server',
         executable='costmap_filter_info_server',
@@ -132,6 +142,6 @@ def generate_launch_description():
     )
 
     return LaunchDescription(args + [
-        bridge, keepout_mask, filter_info_server, filter_lifecycle,
+        bridge, supervisor, filter_info_server, filter_lifecycle,
         slam, nav2, tcp_endpoint, rviz,
     ])
