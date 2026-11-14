@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import math
 import signal
+import threading
 import time
 
 import cv2
@@ -228,15 +229,20 @@ class CoppeliaBackend:
             self._guard(self.sim.setBoolParam, self.sim.boolparam_display_enabled, enabled)
         return previous
 
-    def shutdown(self, stop_simulation: bool, restore_display=None) -> None:
+    def shutdown(self, stop_simulation: bool, restore_display=None,
+                 close_main: bool = True) -> None:
         """Stop the wheels, restore the display and optionally stop the simulation.
 
         Runs on a fresh connection: a Ctrl-C usually lands while the main socket waits for
-        a reply, which leaves that REQ socket unusable.
+        a reply, which leaves that REQ socket unusable. ``close_main=False`` leaves the main
+        socket alone (another thread may still be blocked on it).
         """
         from coppeliasim_zmqremoteapi_client import RemoteAPIClient
 
-        self.close()
+        if close_main:
+            self.close()
+        else:
+            self.client, self.sim = None, None
         client = None
         try:
             client = RemoteAPIClient(host=self.host, port=self.port)
@@ -315,7 +321,8 @@ class MockBackend:
     def set_display(self, enabled: bool) -> bool:
         return enabled
 
-    def shutdown(self, stop_simulation: bool, restore_display=None) -> None:
+    def shutdown(self, stop_simulation: bool, restore_display=None,
+                 close_main: bool = True) -> None:
         self.v = self.w = 0.0
 
 
@@ -391,6 +398,13 @@ class CoppeliaBridgeNode(Node):
         self.scan_msg = self._make_scan_template()
         self.stats = {'cycles': 0, 'exchange_s': 0.0, 'max_s': 0.0, 'since': time.monotonic()}
         self.stats_period = float(p('stats_period', 10.0).value)
+        # The backend's ZMQ socket is not thread-safe. The timers below never overlap (same
+        # mutually exclusive group), but on Ctrl-C the main thread runs shutdown_backend()
+        # while a worker thread may still be inside an exchange: closing the socket under a
+        # pending recv() aborts the process in libzmq (signaler.cpp assertion), skipping the
+        # cleanup. Every backend use holds this lock; `closing` stops new uses.
+        self.backend_lock = threading.Lock()
+        self.closing = False
 
         # Both timers use the backend: never run them concurrently.
         backend_group = MutuallyExclusiveCallbackGroup()
@@ -503,10 +517,13 @@ class CoppeliaBridgeNode(Node):
         # Also republished every second: Unity (ROS-TCP-Connector) subscribes with volatile
         # QoS and would miss a status that is only published on change.
         self.status_pub.publish(String(data=self.status))
-        if not self.connected:
-            self.try_connect()
-        elif not self.sim_running:
-            self.update_sim_state()  # cheap while stopped; detects a (re)started simulation
+        with self.backend_lock:
+            if self.closing:
+                return
+            if not self.connected:
+                self.try_connect()
+            elif not self.sim_running:
+                self.update_sim_state()  # cheap while stopped; detects a (re)started simulation
 
     def current_wheels(self):
         v, w = self.cmd
@@ -515,6 +532,11 @@ class CoppeliaBridgeNode(Node):
         return bm.diff_drive_ik(v, w, self.wheel_radius, self.wheel_base)
 
     def on_cycle(self) -> None:
+        with self.backend_lock:
+            if not self.closing:
+                self._cycle()
+
+    def _cycle(self) -> None:
         if not self.connected:
             return
         now = time.monotonic()
@@ -640,11 +662,23 @@ class CoppeliaBridgeNode(Node):
 
     # -- shutdown ---------------------------------------------------------------------
     def shutdown_backend(self) -> None:
-        if self.backend is not None:
-            self.backend.shutdown(self.stop_sim_on_exit and self.sim_started_by_bridge,
-                                  self.display_to_restore)
-            self.backend = None
-        self.connected = False
+        """Clean up in CoppeliaSim. Called from the main thread after spin() returns, while
+        executor worker threads may still be running a callback: wait for the in-flight
+        backend call (bounded by the Remote API timeout) before touching the socket."""
+        self.closing = True
+        acquired = self.backend_lock.acquire(timeout=self.timeout_ms / 1000.0 + 2.0)
+        if not acquired:
+            self.get_logger().warning(
+                'A CoppeliaSim call is still pending: cleaning up without closing its socket')
+        try:
+            if self.backend is not None:
+                self.backend.shutdown(self.stop_sim_on_exit and self.sim_started_by_bridge,
+                                      self.display_to_restore, close_main=acquired)
+                self.backend = None
+            self.connected = False
+        finally:
+            if acquired:
+                self.backend_lock.release()
 
 
 def main(args=None):

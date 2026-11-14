@@ -228,3 +228,59 @@ def test_robot_pose(h):
     o = h.odoms[-1]
     assert p.pose.position.x == pytest.approx(o.pose.pose.position.x, abs=0.05)
     assert p.pose.position.y == pytest.approx(o.pose.pose.position.y, abs=0.05)
+
+
+class _SlowBackend:
+    """Wraps the mock backend: each exchange takes 0.4 s and records overlaps with shutdown."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.in_exchange = False
+        self.exchanges = 0
+        self.overlap = False
+        self.shutdown_after_exchange = None
+        self.camera_pose = inner.camera_pose
+        self.host = 'mock'
+        self.started_simulation = False
+
+    def exchange(self, *args, **kwargs):
+        self.in_exchange = True
+        self.exchanges += 1
+        time.sleep(0.4)
+        self.in_exchange = False
+        return self.inner.exchange(*args, **kwargs)
+
+    def shutdown(self, *args, **kwargs):
+        self.overlap = self.overlap or self.in_exchange
+        self.shutdown_after_exchange = not self.in_exchange
+        return self.inner.shutdown(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+
+def test_shutdown_waits_for_inflight_exchange(h):
+    """Regression: on Ctrl-C the main thread ran shutdown_backend() while an executor worker
+    was inside an exchange; closing the ZMQ socket under a pending recv() aborted the bridge
+    in libzmq. shutdown_backend() must wait for the in-flight call and block new ones."""
+    import threading
+    assert h.spin_until(lambda: h.odoms, 3.0)
+    slow = _SlowBackend(h.bridge.backend)
+    h.bridge.backend = slow
+    worker = threading.Thread(target=h.bridge.on_cycle)   # what an executor thread does
+    worker.start()
+    time.sleep(0.1)
+    assert slow.in_exchange
+    t0 = time.monotonic()
+    h.bridge.shutdown_backend()
+    waited = time.monotonic() - t0
+    worker.join(2.0)
+    assert not slow.overlap
+    assert slow.shutdown_after_exchange is True
+    assert waited >= 0.2, f'shutdown did not wait for the exchange ({waited:.2f} s)'
+    # Callbacks firing after the shutdown must not touch the backend.
+    n = slow.exchanges
+    h.bridge.on_cycle()
+    h.bridge.on_status_timer()
+    assert slow.exchanges == n
+    assert h.bridge.backend is None
