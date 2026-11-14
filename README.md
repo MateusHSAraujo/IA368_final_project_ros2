@@ -32,9 +32,28 @@ The Windows folder is reachable from here through the `windows_workspace` symlin
 ├── IMPLEMENTATION_PLAN.md   -> windows_workspace/IMPLEMENTATION_PLAN.md  (symlink)
 ├── STAGE1_UNITY_PLAN.md     -> windows_workspace/STAGE1_UNITY_PLAN.md    (symlink)
 ├── STAGE4_VR_LOCOMOTION_PLAN.md -> windows_workspace/STAGE4_VR_LOCOMOTION_PLAN.md (symlink)
-├── ros2_ws/                 # ROS 2 Jazzy workspace (vr_robot_pkg and ROS-TCP-Endpoint)
-├── scripts/                 # Automation scripts (sync_to_windows.sh, network helpers)
-└── tests/                   # Offline automated tests in Python (pytest)
+├── ros2_ws/src/
+│   ├── vr_robot_pkg/        # Bridge, keepout mask, configs, bringup launch; README = ROS interface contract
+│   └── ROS-TCP-Endpoint/    # git submodule (Unity-Technologies, main-ros2)
+├── scripts/
+│   ├── get_windows_host_ip.sh   # Windows host IP for CoppeliaSim (--check PORT)
+│   ├── setup_adb_reverse.ps1    # Quest 3 adb reverse / portproxy (mirrored to Windows)
+│   ├── sync_to_windows.sh       # Copies scripts/*.ps1 to the Windows repo
+│   └── coppelia/                # prepare_scene_house.py, install_fast_laser.py (scene tools)
+└── tests/                   # Offline pytest suite; tests/live/ = checks against the running stack
+```
+
+## Status and quick start
+
+Stages 2 and 3 are done: the Pioneer P3-DX in `scene_house.ttt` runs with SLAM, Nav2 (with keepout filter), a compressed front camera and ROS-TCP-Endpoint on port 10000. See [`ros2_ws/src/vr_robot_pkg/README.md`](ros2_ws/src/vr_robot_pkg/README.md) for the interface contract used by Unity.
+
+```bash
+git submodule update --init
+source /opt/ros/jazzy/setup.bash
+cd ros2_ws && colcon build --symlink-install && source install/setup.bash
+ros2 launch vr_robot_pkg vr_robot_bringup.launch.py          # CoppeliaSim on Windows with scene_house.ttt open
+ros2 launch vr_robot_pkg vr_robot_bringup.launch.py mock_mode:=true   # without CoppeliaSim
+cd .. && pytest tests/
 ```
 
 For architecture details, network topology and the stage plan, see:

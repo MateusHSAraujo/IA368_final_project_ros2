@@ -33,6 +33,22 @@ Everything committed is in **English**: code, comments, log strings, documentati
 - Never pull large meshes/textures through the Remote API (CBOR serialization in Lua freezes the add-on).
 - `sim.getShapeViz(h, i)` does not fail for out-of-range indices; get the count from `#sim.getIntArrayProperty(h, 'meshes')`.
 - ROS nodes must tolerate CoppeliaSim being absent (retry loop or `mock_mode:=true`) so the offline tests keep working.
+- **Throughput while simulating: only ~1–2 Remote API requests are answered per simulation step** (~20/s). Batch: the bridge makes one `sim.callScriptFunction('remoteExchange', ...)` per cycle (function in the laser script installed by `scripts/coppelia/install_fast_laser.py`). While stopped, ~400 calls/s.
+- Simulation speed in `scene_house.ttt`: the class laser sweep (452 proximity rays/step in Lua) and CoppeliaSim's own window rendering each halve it. Use the depth-camera laser and keep the display off (`sim.boolparam_display_enabled`, the bridge does it). Measure with `sim.getSimulationTime()` vs wall time.
+- `sim.getVisionSensorImg` rows are bottom-up (flip vertically only); `sim.saveImage(img, res, 0, '.jpg', q)` returns an upright JPEG buffer.
+- No `sim.executeScriptString` in 4.10: to run Lua for debugging, create a temporary customization script (`sim.createScript`), wait ~1 s for init, `sim.callScriptFunction`, then remove it.
+- A Ctrl-C during a pending request leaves the REQ socket unusable: do cleanup over a fresh client.
+
+## Status
+- Stages 2 and 3 done (2026-11-13), validated live against `scene_house.ttt`. Contract for Stages 5–6: `ros2_ws/src/vr_robot_pkg/README.md`. Next on this side: mission supervisor (Stage 5) and twist_mux (Stage 6, `sudo apt install ros-jazzy-twist-mux`).
+- `scene_house.ttt` was saved on Windows (2026-11-13) with `/myRobot`, `/myRobot/frontCamera`, respondable house shapes, real-time mode and the depth-camera laser v2. Scene changes made through the Remote API live only in memory until the user saves the scene in CoppeliaSim.
+
+## ROS-side practical lessons
+- `ament_python` + `--symlink-install`: Python modules and config/launch files are **copied** into `install/`; rebuild after every change before a live run (pytest imports `src/` through `tests/conftest.py`, so it can pass on stale installs).
+- Processes started in the background from a non-interactive shell inherit SIGINT as ignored: start `ros2 launch` through a wrapper that restores `SIG_DFL`, stop it with one SIGINT to the launch process, and never `pkill -f` a pattern contained in your own command line.
+- `tf2_ros.TransformListener(spin_thread=True)` spins the whole node in a second executor (timers included): don't use it in nodes with blocking timers.
+- Publishers created right before publishing lose messages until discovery matches: wait for `get_subscription_count() > 0`. A stale ROS daemon hides topics: `ros2 daemon stop`.
+- Live checks: `tests/live/check_live_stack.py` and `tests/live/check_tcp_endpoint.py` (not collected by pytest).
 
 ## Verification
-`colcon build` in `ros2_ws`, `pytest tests/`, mock action servers for Nav2 actions. ROS 2 Jazzy: `source /opt/ros/jazzy/setup.bash`.
+`colcon build --symlink-install` in `ros2_ws`, `pytest tests/` (offline, incl. the bridge in mock mode), mock action servers for Nav2 actions, and the live checks above when CoppeliaSim is available. ROS 2 Jazzy: `source /opt/ros/jazzy/setup.bash`.
