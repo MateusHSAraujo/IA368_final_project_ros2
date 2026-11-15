@@ -220,6 +220,38 @@ def test_bridge_status(h):
     assert h.status[-1].data == 'mock'
 
 
+def test_status_republished_while_cycles_overrun():
+    """A late volatile subscriber (as ROS-TCP-Endpoint) still gets the status every second when
+    each cycle takes longer than its period (simulation slower than real time)."""
+    from rclpy.executors import MultiThreadedExecutor
+    rclpy.init(args=['--ros-args', '-p', 'mock_mode:=true'])
+    bridge = probe = None
+    try:
+        bridge = CoppeliaBridgeNode()
+        bridge._cycle = lambda: time.sleep(0.15)  # 3x the 20 Hz period
+        probe = rclpy.create_node('probe_volatile')
+        got = []
+        volatile = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.RELIABLE,
+                              durability=QoSDurabilityPolicy.VOLATILE)
+        probe.create_subscription(String, '/myRobot/bridge_status', got.append, volatile)
+        ex = MultiThreadedExecutor(num_threads=3)
+        ex.add_node(bridge)
+        ex.add_node(probe)
+        end = time.monotonic() + 3.5
+        while time.monotonic() < end:
+            ex.spin_once(timeout_sec=0.05)
+        assert len(got) >= 2, f'status republished {len(got)} time(s) in 3.5 s'
+        assert got[-1].data == 'mock'
+    finally:
+        if bridge is not None:
+            bridge.shutdown_backend()
+            bridge.destroy_node()
+        if probe is not None:
+            probe.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
 def test_robot_pose(h):
     assert h.spin_until(lambda: h.poses and h.odoms, 3.0)
     h.spin_for(0.3)

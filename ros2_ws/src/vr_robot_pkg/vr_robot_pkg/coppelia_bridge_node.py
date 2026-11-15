@@ -437,6 +437,11 @@ class CoppeliaBridgeNode(Node):
         backend_group = MutuallyExclusiveCallbackGroup()
         self.create_timer(1.0 / cycle_rate, self.on_cycle, callback_group=backend_group)
         self.create_timer(1.0, self.on_status_timer, callback_group=backend_group)
+        # The status republish has its own group: when a cycle overruns its period (the
+        # simulation runs slower than real time), the cycle timer is always ready and starves
+        # every other timer of backend_group, so a republish there never ran.
+        self.create_timer(1.0, self.on_status_republish,
+                          callback_group=MutuallyExclusiveCallbackGroup())
         self.set_status('mock' if self.mock else 'disconnected')
         self.try_connect()
 
@@ -548,10 +553,20 @@ class CoppeliaBridgeNode(Node):
             self.camera_enabled = msg.data
             self.get_logger().info(f'Camera {"enabled" if msg.data else "disabled"}')
 
+    def on_status_republish(self) -> None:
+        # Republished every second: Unity (ROS-TCP-Connector) subscribes with volatile QoS and
+        # would miss a status that is only published on change. No backend access here.
+        # After Ctrl-C the context is shut down while a worker thread may still fire this
+        # timer: skip it instead of publishing on an invalid context.
+        if self.closing or not self.context.ok():
+            return
+        try:
+            self.status_pub.publish(String(data=self.status))
+        except Exception:  # context invalidated between the check and the publish
+            if self.context.ok():
+                raise
+
     def on_status_timer(self) -> None:
-        # Also republished every second: Unity (ROS-TCP-Connector) subscribes with volatile
-        # QoS and would miss a status that is only published on change.
-        self.status_pub.publish(String(data=self.status))
         with self.backend_lock:
             if self.closing:
                 return
