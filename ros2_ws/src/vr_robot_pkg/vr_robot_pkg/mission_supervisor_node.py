@@ -6,7 +6,10 @@ node turns them into:
 * Nav2 actions: ``/hmi/goal`` -> NavigateToPose, ``/hmi/path`` -> NavigateThroughPoses
   (thinned to waypoints), ``/hmi/mission_cmd`` PAUSE / RESUME / CANCEL (Nav2 has no native
   pause: PAUSE cancels and keeps the remaining poses). A nonzero ``/cmd_vel_teleop`` command
-  auto-pauses an active mission. State on ``/hmi/mission_state`` (JSON).
+  auto-pauses an active mission. State on ``/hmi/mission_state`` (JSON). A new goal is
+  sent only after the previous one has ended in Nav2: bt_navigator aborts a goal on one
+  action while the other is still running, and a cancel ends a pending goal on the same
+  action too.
 * The Nav2 keepout filter mask: ``/hmi/keepout_stroke`` brush strokes (dilated by the robot
   half-width) are rasterized into ``/keepout_filter_mask`` (reliable + transient_local, which
   ROS-TCP-Endpoint cannot publish). ``/keepout_mask_test`` polygons are kept for debugging.
@@ -15,6 +18,8 @@ node turns them into:
 
 Odometry is CoppeliaSim ground truth and ``map -> odom`` starts at identity, so a saved map
 frame is the world frame and the robot pose in a loaded map is simply its odom pose.
+slam_toolbox pins that pose to the next scan it processes, so LOAD waits until the robot
+has stopped (otherwise ``map -> odom`` would keep the motion in between as an offset).
 
 Single-threaded and fully asynchronous: no callback ever blocks on a future.
 """
@@ -62,6 +67,13 @@ class MissionSupervisorNode(Node):
         self.maps_dir = ms.resolve_maps_dir(str(p('maps_dir', '').value or ''))
         self.initial_map = str(p('initial_map', '').value or '')
         self.service_timeout = float(p('service_timeout', 30.0).value)
+        # Longest wait for Nav2 to end a canceled goal before the next goal is sent anyway.
+        self.cancel_timeout = float(p('cancel_timeout', 5.0).value)
+        # LOAD waits until the odometry speed stays below these for settle_time.
+        self.still_linear = float(p('still_linear_speed', 0.01).value)
+        self.still_angular = float(p('still_angular_speed', 0.01).value)
+        self.settle_time = float(p('settle_time', 0.5).value)
+        self.stop_timeout = float(p('stop_timeout', 10.0).value)
         slam_ns = p('slam_namespace', '/slam_toolbox').value.rstrip('/')
 
         # Publishers. The state topics are latched for ROS tools; ROS-TCP-Endpoint subscribes
@@ -98,6 +110,10 @@ class MissionSupervisorNode(Node):
         self.resume_poses = []    # stored by PAUSE
         self.goal_handle = None
         self.generation = 0       # invalidates callbacks of replaced/canceled goals
+        self.inflight = set()     # tokens of goals sent to Nav2 whose result has not arrived
+        self.next_token = 0
+        self.pending_goal = None  # (generation, client, goal) waiting for the old goal to end
+        self.pending_since = 0.0
 
         # Keepout state
         self.mask = km.empty_mask(self.spec)
@@ -112,14 +128,17 @@ class MissionSupervisorNode(Node):
         self.map_message = ''
         self.last_map = None
         self.odom_pose = None     # (x, y, yaw) in odom == world frame
+        self.still_since = None   # monotonic time since the robot is stopped (None = moving)
+        self.pending_load = None  # (map_op, name) of a LOAD waiting for the robot to stop
+        self.maps = ms.list_maps(self.maps_dir)   # refreshed on map commands and SAVE
         self.initial_map_done = not self.initial_map
         self.last_initial_log = 0.0
         self._last_mission_json = None
         self._last_map_json = None
 
         self.create_timer(float(p('state_period', 1.0).value), self.on_state_timer)
-        if not self.initial_map_done:
-            self.create_timer(1.0, self.try_initial_map)
+        self.initial_map_timer = (None if self.initial_map_done
+                                  else self.create_timer(1.0, self.try_initial_map))
         self.get_logger().info(f'Maps directory: {self.maps_dir}')
         self.publish_mask()
         self.publish_mission_state(force=True)
@@ -151,7 +170,7 @@ class MissionSupervisorNode(Node):
         text = json.dumps({
             'state': MAP_BUSY if self.map_busy else MAP_READY,
             'map': self.map_name,
-            'maps': ms.list_maps(self.maps_dir),
+            'maps': self.maps,
             'ok': self.map_ok,
             'message': self.map_message,
         })
@@ -160,7 +179,11 @@ class MissionSupervisorNode(Node):
             self.map_state_pub.publish(String(data=text))
 
     def set_map_state(self, ok, message, busy=None):
-        (self.get_logger().info if ok else self.get_logger().warning)(f'Map: {message}')
+        # Two call sites: rclpy raises ValueError when one call site changes severity.
+        if ok:
+            self.get_logger().info(f'Map: {message}')
+        else:
+            self.get_logger().warning(f'Map: {message}')
         self.map_ok = ok
         self.map_message = message
         if busy is not None:
@@ -168,9 +191,25 @@ class MissionSupervisorNode(Node):
         self.publish_map_state()
 
     def on_state_timer(self):
-        if self.map_busy and time.monotonic() - self.map_busy_since > self.service_timeout:
-            self.map_op += 1
-            self.set_map_state(False, 'slam_toolbox did not answer (timed out)', busy=False)
+        now = time.monotonic()
+        if self.pending_load is not None:
+            self._try_send_load()
+            if self.pending_load is not None and now - self.map_busy_since > self.stop_timeout:
+                name = self.pending_load[1]
+                self.pending_load = None
+                self.set_map_state(False, f'LOAD {name}: the robot did not stop within '
+                                   f'{self.stop_timeout:.0f} s', busy=False)
+        elif self.map_busy and now - self.map_busy_since > self.service_timeout:
+            # Not invalidated: slam_toolbox may still finish, and its late answer then
+            # updates map_name and the keepout strokes to match what SLAM is running.
+            self.set_map_state(False, f'slam_toolbox did not answer within '
+                               f'{self.service_timeout:.0f} s (a late answer is still applied)',
+                               busy=False)
+        if self.pending_goal is not None and now - self.pending_since > self.cancel_timeout:
+            self.get_logger().warning(
+                f'Nav2 did not end the previous goal within {self.cancel_timeout:.0f} s: '
+                'sending the new goal anyway')
+            self._dispatch_goal(force=True)
         self.publish_mission_state(force=True)
         self.publish_map_state(force=True)
 
@@ -179,6 +218,15 @@ class MissionSupervisorNode(Node):
         p = msg.pose.pose
         q = p.orientation
         self.odom_pose = (p.position.x, p.position.y, ml.quaternion_to_yaw(q.x, q.y, q.z, q.w))
+        t = msg.twist.twist
+        moving = (math.hypot(t.linear.x, t.linear.y) > self.still_linear
+                  or abs(t.angular.z) > self.still_angular)
+        if moving:
+            self.still_since = None
+        elif self.still_since is None:
+            self.still_since = time.monotonic()
+        if self.pending_load is not None:
+            self._try_send_load()
 
     def on_map(self, msg):
         self.last_map = msg
@@ -235,6 +283,7 @@ class MissionSupervisorNode(Node):
     def _invalidate_goal(self):
         """Forget the active goal and cancel it in Nav2 (its callbacks become stale)."""
         self.generation += 1
+        self.pending_goal = None
         if self.goal_handle is not None:
             self.goal_handle.cancel_goal_async()
             self.goal_handle = None
@@ -252,24 +301,44 @@ class MissionSupervisorNode(Node):
             goal = NavigateToPose.Goal(pose=poses[0])
         else:
             goal = NavigateThroughPoses.Goal(poses=poses)
-        gen = self.generation
         self.poses, self.remaining = list(poses), len(poses)
         self.set_mission(ml.NAVIGATING, message, mode)
+        self.pending_goal = (self.generation, client, goal)
+        self.pending_since = time.monotonic()
+        self._dispatch_goal()
+
+    def _dispatch_goal(self, force=False):
+        """Send the pending goal once every earlier goal has ended in Nav2 (or on force)."""
+        if self.pending_goal is None or (self.inflight and not force):
+            return
+        gen, client, goal = self.pending_goal
+        self.pending_goal = None
+        if gen != self.generation:
+            return
+        token = self.next_token
+        self.next_token += 1
+        self.inflight.add(token)
         future = client.send_goal_async(
             goal, feedback_callback=lambda fb: self._on_feedback(gen, fb))
-        future.add_done_callback(lambda f: self._on_goal_response(gen, f))
+        future.add_done_callback(lambda f: self._on_goal_response(gen, token, f))
 
-    def _on_goal_response(self, gen, future):
+    def _goal_ended(self, token):
+        self.inflight.discard(token)
+        self._dispatch_goal()
+
+    def _on_goal_response(self, gen, token, future):
         handle = future.result()
-        if gen != self.generation:
-            if handle is not None and handle.accepted:
-                handle.cancel_goal_async()   # replaced/paused/canceled before acceptance
-            return
         if handle is None or not handle.accepted:
-            self.set_mission(ml.FAILED, 'goal rejected by Nav2')
+            self._goal_ended(token)
+            if gen == self.generation:
+                self.set_mission(ml.FAILED, 'goal rejected by Nav2')
+            return
+        # Track the result even for a stale goal: the next goal waits until it has ended.
+        handle.get_result_async().add_done_callback(lambda f: self._on_result(gen, token, f))
+        if gen != self.generation:
+            handle.cancel_goal_async()   # replaced/paused/canceled before acceptance
             return
         self.goal_handle = handle
-        handle.get_result_async().add_done_callback(lambda f: self._on_result(gen, f))
 
     def _on_feedback(self, gen, feedback_msg):
         if gen != self.generation or self.state != ml.NAVIGATING:
@@ -280,7 +349,8 @@ class MissionSupervisorNode(Node):
                 self.remaining = min(n, len(self.poses))
                 self.publish_mission_state()
 
-    def _on_result(self, gen, future):
+    def _on_result(self, gen, token, future):
+        self._goal_ended(token)
         if gen != self.generation:
             return
         self.goal_handle = None
@@ -367,6 +437,7 @@ class MissionSupervisorNode(Node):
 
     # ---------------------------------------------------------------- maps
     def on_map_cmd(self, msg):
+        self.maps = ms.list_maps(self.maps_dir)
         try:
             cmd, name = ms.parse_map_cmd(msg.data)
         except ValueError as exc:
@@ -426,6 +497,7 @@ class MissionSupervisorNode(Node):
             except (OSError, ValueError) as exc:
                 notes.append(f'image not saved: {exc}')
         self.map_name = name
+        self.maps = ms.list_maps(self.maps_dir)
         msg = f'saved {name}' + (f' ({"; ".join(notes)})' if notes else '')
         self.set_map_state(not notes, msg, busy=False)
 
@@ -441,6 +513,27 @@ class MissionSupervisorNode(Node):
         if self.state in (ml.NAVIGATING, ml.PAUSED):
             self.cancel('map loaded')
         op = self._begin_map_op(f'loading {name}')
+        self.pending_load = (op, name)
+        self._try_send_load()
+        if self.pending_load is not None:
+            self.set_map_state(True, f'LOAD {name}: waiting for the robot to stop')
+        return True
+
+    def _robot_settled(self):
+        return (self.still_since is not None
+                and time.monotonic() - self.still_since >= self.settle_time)
+
+    def _try_send_load(self):
+        """Send the pending LOAD once the robot is stopped: slam_toolbox applies the given
+        pose to the next scan it processes, not to the robot pose at request time."""
+        op, name = self.pending_load
+        if op != self.map_op:
+            self.pending_load = None
+            return
+        if not self._robot_settled():
+            return
+        self.pending_load = None
+        self.map_busy_since = time.monotonic()
         x, y, yaw = self.odom_pose
         req = DeserializePoseGraph.Request(
             filename=ms.map_base(self.maps_dir, name),
@@ -448,7 +541,6 @@ class MissionSupervisorNode(Node):
             initial_pose=Pose2D(x=float(x), y=float(y), theta=float(yaw)))
         self.deserialize_cli.call_async(req).add_done_callback(
             lambda f: self._on_loaded(op, name, f))
-        return True
 
     def _on_loaded(self, op, name, future):
         if op != self.map_op:
@@ -503,6 +595,7 @@ class MissionSupervisorNode(Node):
                     f'Initial map {self.initial_map}: waiting for {", ".join(waiting)}')
             return
         self.initial_map_done = True
+        self.initial_map_timer.cancel()
         self.load_map(self.initial_map)
 
 

@@ -56,6 +56,11 @@ class MockNav2(Node):
         self.remaining = 2                 # feedback of NavigateThroughPoses in 'hold'
         self.pose_goals, self.through_goals = [], []   # list of lists of PoseStamped
         self.cancels = 0
+        # Like bt_navigator's navigator muxer: a goal on one action is aborted while a goal
+        # on the other action is still running.
+        self.active = {'pose': 0, 'through': 0}
+        self.mux_rejections = 0
+        self.deserialize_delay = 0.0
         self.serialize_calls, self.deserialize_calls, self.reset_calls = [], [], []
         kw = dict(goal_callback=lambda g: GoalResponse.ACCEPT,
                   cancel_callback=self._on_cancel, callback_group=self.cbg)
@@ -91,6 +96,20 @@ class MockNav2(Node):
         self.destroy_timer(timer)
 
     async def _run(self, key, goal_handle, result_cls, make_feedback):
+        other = 'through' if key == 'pose' else 'pose'
+        if self.active[other]:
+            self.mux_rejections += 1
+            goal_handle.abort()
+            res = result_cls()
+            res.error_msg = 'another navigator is processing'
+            return res
+        self.active[key] += 1
+        try:
+            return await self._run_goal(key, goal_handle, result_cls, make_feedback)
+        finally:
+            self.active[key] -= 1
+
+    async def _run_goal(self, key, goal_handle, result_cls, make_feedback):
         beh = self._next(key)
         if beh == 'hold':
             last_fb = 0.0
@@ -138,8 +157,10 @@ class MockNav2(Node):
         resp.result = 0
         return resp
 
-    def _deserialize(self, req, resp):
+    async def _deserialize(self, req, resp):
         self.deserialize_calls.append(req)
+        if self.deserialize_delay:
+            await self._sleep(self.deserialize_delay)
         return resp
 
     def _reset(self, req, resp):
@@ -223,8 +244,9 @@ class Harness:
             f'no subscriber on {pub.topic_name}'
         pub.publish(msg)
 
-    def set_odom(self, x, y, yaw):
+    def set_odom(self, x, y, yaw, v=0.0, w=0.0):
         m = Odometry()
+        m.twist.twist.linear.x, m.twist.twist.angular.z = float(v), float(w)
         m.header.frame_id = 'odom'
         m.child_frame_id = 'base_link'
         m.pose.pose.position.x, m.pose.pose.position.y = x, y
@@ -653,3 +675,85 @@ def test_map_service_missing(make_h):
     h.map_cmd('SAVE house')
     st = h.wait_map(lambda s: s['ok'] is False)
     assert 'not available' in st['message']
+
+
+# ---------------------------------------------------------------------- regressions
+@pytest.mark.parametrize('first,second', [('goal', 'path'), ('path', 'goal')])
+def test_switch_between_goal_and_path(make_h, first, second):
+    """Regression: the new goal was sent right after the cancel, while the old navigator
+    was still running, and bt_navigator aborted it (mission FAILED)."""
+    h = make_h()
+    key = {'goal': 'pose', 'path': 'through'}
+    h.mock.behavior = {key[first]: ['hold'], key[second]: ['succeed']}
+    send = {'goal': lambda: h.goal(3.0, 1.5),
+            'path': lambda: h.path([(1.0, 2.0), (2.0, 2.0), (3.0, 2.0)])}
+    send[first]()
+    h.wait_state('NAVIGATING', mode=first)
+    assert h.spin_until(lambda: h.mock.active[key[first]] == 1, 5.0)
+    send[second]()
+    h.wait_state('SUCCEEDED', mode=second, timeout=8.0)
+    assert h.mock.mux_rejections == 0
+    assert h.mock.cancels >= 1
+    assert all(s['state'] != 'FAILED' for s in h.mission)
+
+
+def test_load_waits_for_the_robot_to_stop(make_h, tmp_path):
+    """Regression: LOAD sent the odom pose of the request time, but slam_toolbox applies it
+    to the next scan; a moving robot left map -> odom offset for the rest of the session."""
+    make_map_files(tmp_path)
+    h = make_h()
+    h.set_odom(1.0, 2.0, 0.5, v=0.3)
+    h.map_cmd('LOAD house')
+    st = h.wait_map(lambda s: 'waiting for the robot to stop' in s['message'])
+    assert st['state'] == 'BUSY'
+    h.spin_for(1.0)
+    assert h.mock.deserialize_calls == []
+    h.set_odom(1.5, 2.25, 0.75)          # stopped here
+    assert h.spin_until(lambda: h.mock.deserialize_calls, 3.0)
+    req = h.mock.deserialize_calls[0]
+    assert (req.initial_pose.x, req.initial_pose.y) == pytest.approx((1.5, 2.25))
+    assert req.initial_pose.theta == pytest.approx(0.75, abs=1e-6)
+    h.wait_map(lambda s: s['map'] == 'house' and s['state'] == 'READY' and s['ok'])
+
+
+def test_load_fails_if_the_robot_keeps_moving(make_h, tmp_path):
+    make_map_files(tmp_path)
+    h = make_h(params=['stop_timeout:=1.0', 'state_period:=0.2'])
+    h.set_odom(1.0, 2.0, 0.5, w=0.5)
+    h.map_cmd('LOAD house')
+    st = h.wait_map(lambda s: s['state'] == 'READY' and s['ok'] is False, timeout=4.0)
+    assert 'did not stop' in st['message']
+    assert h.mock.deserialize_calls == []
+
+
+def test_late_load_answer_is_applied(make_h, tmp_path):
+    """Regression: after a service timeout the late slam_toolbox answer was dropped, so the
+    supervisor's map name and keepout no longer matched the map SLAM had loaded."""
+    make_map_files(tmp_path)
+    ms.save_strokes(str(tmp_path), 'house', [[(0.5, 0.5, 0.1)]])
+    h = make_h(params=['service_timeout:=0.3', 'state_period:=0.1'])
+    h.mock.deserialize_delay = 1.5
+    h.map_cmd('LOAD house')
+    st = h.wait_map(lambda s: s['ok'] is False and 'did not answer' in s['message'], 3.0)
+    assert st['state'] == 'READY' and st['map'] is None
+    st = h.wait_map(lambda s: s['map'] == 'house' and s['ok'] is True, 4.0)
+    assert '1 keepout strokes' in st['message']
+    h.wait_mask(lambda m: m.any())
+
+
+def test_initial_map_timer_stops_after_load(make_h, tmp_path):
+    make_map_files(tmp_path)
+    h = make_h(params=['initial_map:=house'])
+    assert h.spin_until(lambda: h.mock.deserialize_calls, 8.0)
+    assert h.sup.initial_map_timer.is_canceled()
+
+
+def test_map_failure_after_success_does_not_crash(make_h, tmp_path):
+    """Regression: set_map_state logged at INFO and WARNING from one call site; rclpy raises
+    ValueError on the second severity, which killed the node (e.g. a bad LOAD after a SAVE)."""
+    h = make_h()
+    h.map_cmd('SAVE house')
+    h.wait_map(lambda s: s['map'] == 'house' and s['ok'] is True)
+    h.map_cmd('LOAD nothere')
+    st = h.wait_map(lambda s: s['ok'] is False)
+    assert 'no saved map' in st['message']

@@ -88,7 +88,8 @@ def make_state(pose, twist, running, scan=None, scan_seq=None, jpeg=None):
 class CoppeliaBackend:
     """Access to /myRobot through the ZMQ Remote API. Every call may raise SimDisconnected."""
 
-    def __init__(self, host: str, port: int, robot_path: str, timeout_ms: int, logger):
+    def __init__(self, host: str, port: int, robot_path: str, timeout_ms: int, logger,
+                 abort: threading.Event | None = None):
         self.host = host
         self.port = port
         self.robot_path = robot_path
@@ -100,6 +101,14 @@ class CoppeliaBackend:
         self.camera_pose = DEFAULT_CAMERA_POSE
         self.exchange_script = None
         self.wheels_sent = None
+        self.left = self.right = None
+        # Set by the node on shutdown: no new Remote API call is started, so a callback
+        # holding the backend lock finishes after at most one pending call.
+        self.abort = abort if abort is not None else threading.Event()
+
+    def _check_abort(self) -> None:
+        if self.abort.is_set():
+            raise SimDisconnected('bridge shutting down')
 
     # -- connection -------------------------------------------------------------------
     def connect(self, start_simulation: bool) -> None:
@@ -110,32 +119,41 @@ class CoppeliaBackend:
         client.socket.setsockopt(zmq.SNDTIMEO, self.timeout_ms)
         client.socket.setsockopt(zmq.LINGER, 0)
         self.client = client
+
+        def call(fn, *args):
+            self._check_abort()
+            return fn(*args)
         try:
-            sim = client.require('sim')
+            sim = call(client.require, 'sim')
             self.sim = sim
-            self.robot = sim.getObject(self.robot_path)
-            self.gt = sim.getObject(self.robot_path + '/Ground_truth')
-            self.left = sim.getObject(self.robot_path + '/leftMotor')
-            self.right = sim.getObject(self.robot_path + '/rightMotor')
-            self.camera = sim.getObject(self.robot_path + '/frontCamera', {'noError': True})
+            self.robot = call(sim.getObject, self.robot_path)
+            self.gt = call(sim.getObject, self.robot_path + '/Ground_truth')
+            self.left = call(sim.getObject, self.robot_path + '/leftMotor')
+            self.right = call(sim.getObject, self.robot_path + '/rightMotor')
+            self.camera = call(sim.getObject, self.robot_path + '/frontCamera', {'noError': True})
             if self.camera != -1:
-                self.camera_pose = tuple(float(v) for v in sim.getObjectPose(self.camera, self.gt))
+                self.camera_pose = tuple(
+                    float(v) for v in call(sim.getObjectPose, self.camera, self.gt))
             else:
                 self.log.warning(f'{self.robot_path}/frontCamera not found: camera disabled')
-            self._find_exchange_script()
-            if start_simulation and sim.getSimulationState() == sim.simulation_stopped:
-                sim.startSimulation()
+            self._find_exchange_script(call)
+            if (start_simulation
+                    and call(sim.getSimulationState) == sim.simulation_stopped):
+                # Set first: if the call times out or connect fails afterwards, the
+                # simulation may still have started and must be stopped on exit.
                 self.started_simulation = True
+                call(sim.startSimulation)
                 self.log.info('Simulation started by the bridge')
         except Exception:
             self.close()
             raise
 
-    def _find_exchange_script(self) -> None:
+    def _find_exchange_script(self, call) -> None:
         sim = self.sim
-        laser = sim.getObject(self.robot_path + '/LaserScanner_2D', {'noError': True})
-        script = sim.getScript(sim.scripttype_childscript, laser) if laser != -1 else -1
-        text = sim.getScriptStringParam(script, sim.scriptstringparam_text) if script != -1 else ''
+        laser = call(sim.getObject, self.robot_path + '/LaserScanner_2D', {'noError': True})
+        script = call(sim.getScript, sim.scripttype_childscript, laser) if laser != -1 else -1
+        text = (call(sim.getScriptStringParam, script, sim.scriptstringparam_text)
+                if script != -1 else '')
         if f'function {EXCHANGE_FUNCTION}' in text:
             self.exchange_script = script
         else:
@@ -153,12 +171,12 @@ class CoppeliaBackend:
             client.context.term()
         except Exception:
             pass
-        # Avoid a second close in RemoteAPIClient.__del__.
-        client.__del__ = lambda: None
+        # RemoteAPIClient.__del__ closes again later; closing twice is harmless in pyzmq.
 
     def _guard(self, fn, *args):
         if self.sim is None:
             raise SimDisconnected('not connected')
+        self._check_abort()
         try:
             return fn(*args)
         except Exception as exc:  # zmq.Again (timeout), zmq errors, CoppeliaSim errors
@@ -175,6 +193,7 @@ class CoppeliaBackend:
         """Send the wheel velocities (left, right) and return a state dict (see make_state)."""
         if self.sim is None:
             raise SimDisconnected('not connected')
+        self._check_abort()
         if self.exchange_script is not None and running:
             try:
                 out = self.sim.callScriptFunction(
@@ -235,7 +254,8 @@ class CoppeliaBackend:
 
         Runs on a fresh connection: a Ctrl-C usually lands while the main socket waits for
         a reply, which leaves that REQ socket unusable. ``close_main=False`` leaves the main
-        socket alone (another thread may still be blocked on it).
+        socket alone (another thread may still be blocked on it). Works on a backend that
+        never connected (the motor handles are then looked up).
         """
         from coppeliasim_zmqremoteapi_client import RemoteAPIClient
 
@@ -250,8 +270,11 @@ class CoppeliaBackend:
             client.socket.setsockopt(zmq.SNDTIMEO, self.timeout_ms)
             client.socket.setsockopt(zmq.LINGER, 0)
             sim = client.require('sim')
-            sim.setJointTargetVelocity(self.left, 0.0)
-            sim.setJointTargetVelocity(self.right, 0.0)
+            for handle, name in ((self.left, 'leftMotor'), (self.right, 'rightMotor')):
+                if handle is None:
+                    handle = sim.getObject(f'{self.robot_path}/{name}', {'noError': True})
+                if handle != -1:
+                    sim.setJointTargetVelocity(handle, 0.0)
             if restore_display is not None:
                 sim.setBoolParam(sim.boolparam_display_enabled, bool(restore_display))
             if stop_simulation:
@@ -356,6 +379,9 @@ class CoppeliaBridgeNode(Node):
         # The first simulation steps of a large scene can take several seconds.
         self.timeout_ms = int(p('remote_api_timeout_ms', 10000).value)
         self.reconnect_period = float(p('reconnect_period', 2.0).value)
+        # Resolved once: detection runs a subprocess (wslinfo) and the host does not change.
+        self.host = None if self.mock else (
+            self.host_param or detect_windows_host_ip() or '127.0.0.1')
 
         # Publishers
         self.scan_pub = self.create_publisher(LaserScan, '/myRobot/scan', 10)
@@ -405,6 +431,7 @@ class CoppeliaBridgeNode(Node):
         # cleanup. Every backend use holds this lock; `closing` stops new uses.
         self.backend_lock = threading.Lock()
         self.closing = False
+        self.abort = threading.Event()   # set with closing; checked before every Remote API call
 
         # Both timers use the backend: never run them concurrently.
         backend_group = MutuallyExclusiveCallbackGroup()
@@ -425,15 +452,19 @@ class CoppeliaBridgeNode(Node):
         if now - self.last_connect_attempt < self.reconnect_period:
             return
         self.last_connect_attempt = now
+        # A local reference: shutdown_backend() may clear self.backend from the main thread.
         if self.mock:
-            self.backend = MockBackend(self.wheel_radius, self.wheel_base)
+            backend = MockBackend(self.wheel_radius, self.wheel_base)
         else:
-            host = self.host_param or detect_windows_host_ip() or '127.0.0.1'
-            self.backend = CoppeliaBackend(host, self.port, self.robot_path, self.timeout_ms,
-                                           self.get_logger())
+            backend = CoppeliaBackend(self.host, self.port, self.robot_path, self.timeout_ms,
+                                      self.get_logger(), self.abort)
+        self.backend = backend
         try:
-            self.backend.connect(self.start_sim)
+            backend.connect(self.start_sim)
         except Exception as exc:
+            self.sim_started_by_bridge |= backend.started_simulation
+            if self.closing:
+                return
             self.backend = None
             self.get_logger().warning(
                 f'CoppeliaSim not available ({exc}); retrying every {self.reconnect_period:.0f} s. '
@@ -441,21 +472,25 @@ class CoppeliaBridgeNode(Node):
                 'API server@addonScript: abort execution" in CoppeliaSim.',
                 throttle_duration_sec=30.0)
             return
+        self.sim_started_by_bridge |= backend.started_simulation
+        if self.closing:
+            return
         self.connected = True
-        self.sim_started_by_bridge |= self.backend.started_simulation
         if not self.mock:
             try:
-                previous = self.backend.set_display(self.coppelia_display)
+                previous = backend.set_display(self.coppelia_display)
             except SimDisconnected as exc:
                 self.on_disconnect(exc)
                 return
             if self.display_to_restore is None:
                 self.display_to_restore = previous
-            self.get_logger().info(f'Connected to CoppeliaSim at {self.backend.host}:{self.port}')
+            self.get_logger().info(f'Connected to CoppeliaSim at {backend.host}:{self.port}')
         self.publish_static_transforms()
         self.update_sim_state()
 
     def on_disconnect(self, exc: Exception) -> None:
+        if self.closing:
+            return   # shutdown_backend() owns the backend and its socket from now on
         if self.connected:
             self.get_logger().error(f'Lost the CoppeliaSim connection: {exc}')
         self.connected = False
@@ -562,11 +597,13 @@ class CoppeliaBridgeNode(Node):
         if now - self.last_robot_pose_time >= self.robot_pose_period * 0.9:
             self.last_robot_pose_time = now
             self.publish_robot_pose(stamp, x, y, q)
-        if state['scan'] is not None:
+        # Only a new scan restarts the scan period: a repeated one (same simulation step)
+        # is asked for again on the next cycle.
+        if state['scan'] is not None and (state['scan_seq'] is None
+                                          or state['scan_seq'] != self.last_scan_seq):
             self.last_scan_time = now
-            if state['scan_seq'] is None or state['scan_seq'] != self.last_scan_seq:
-                self.last_scan_seq = state['scan_seq']
-                self.publish_scan(stamp, state['scan'])
+            self.last_scan_seq = state['scan_seq']
+            self.publish_scan(stamp, state['scan'])
         if state['jpeg'] is not None:
             self.last_camera_time = now
             self.publish_camera(stamp, state['jpeg'])
@@ -664,16 +701,26 @@ class CoppeliaBridgeNode(Node):
     def shutdown_backend(self) -> None:
         """Clean up in CoppeliaSim. Called from the main thread after spin() returns, while
         executor worker threads may still be running a callback: wait for the in-flight
-        backend call (bounded by the Remote API timeout) before touching the socket."""
+        backend call before touching the socket. `abort` stops a callback from starting
+        another Remote API call, so the wait is bounded by one call's timeout."""
         self.closing = True
+        self.abort.set()
         acquired = self.backend_lock.acquire(timeout=self.timeout_ms / 1000.0 + 2.0)
         if not acquired:
             self.get_logger().warning(
                 'A CoppeliaSim call is still pending: cleaning up without closing its socket')
         try:
-            if self.backend is not None:
-                self.backend.shutdown(self.stop_sim_on_exit and self.sim_started_by_bridge,
-                                      self.display_to_restore, close_main=acquired)
+            backend = self.backend
+            if (backend is None and not self.mock
+                    and (self.sim_started_by_bridge or self.display_to_restore is not None)):
+                # Disconnected (e.g. one timed-out exchange) when the node stopped: the
+                # simulation and the display still need restoring, over a fresh client.
+                backend = CoppeliaBackend(self.host, self.port, self.robot_path,
+                                          self.timeout_ms, self.get_logger())
+            if backend is not None:
+                started = self.sim_started_by_bridge or backend.started_simulation
+                backend.shutdown(self.stop_sim_on_exit and started,
+                                 self.display_to_restore, close_main=acquired)
                 self.backend = None
             self.connected = False
         finally:

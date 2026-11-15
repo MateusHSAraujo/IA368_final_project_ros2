@@ -284,3 +284,83 @@ def test_shutdown_waits_for_inflight_exchange(h):
     h.bridge.on_status_timer()
     assert slow.exchanges == n
     assert h.bridge.backend is None
+
+
+class _RepeatScanBackend:
+    """Returns the same scan (same scan_seq) on every exchange, as remoteExchange does when
+    two exchanges land in the same simulation step."""
+
+    camera_pose = None
+    started_simulation = False
+
+    def __init__(self):
+        self.want_scan = []
+
+    def exchange(self, wheels, want_scan, want_camera, jpeg_quality, running):
+        from vr_robot_pkg.coppelia_bridge_node import make_state
+        self.want_scan.append(want_scan)
+        return make_state((0, 0, 0, 0, 0, 0, 1), (0, 0, 0), True,
+                          scan=[1.0] * bm.SCAN_SAMPLES, scan_seq=7)
+
+    def shutdown(self, *_args, **_kwargs):
+        pass
+
+
+def test_repeated_scan_does_not_restart_scan_period(h):
+    """Regression: a repeated scan (unchanged scan_seq, not published) restarted the scan
+    period, delaying the next new scan and lowering the /myRobot/scan rate."""
+    assert h.spin_until(lambda: h.odoms, 3.0)
+    stub = _RepeatScanBackend()
+    with h.bridge.backend_lock:
+        h.bridge.backend = stub
+        h.bridge.last_scan_seq = None
+        h.bridge.last_scan_time = -1e9
+        h.bridge._cycle()                 # new seq 7: published, period restarts
+        published_at = h.bridge.last_scan_time
+        time.sleep(h.bridge.scan_period)
+        h.bridge._cycle()                 # seq 7 again: not published
+        assert h.bridge.last_scan_time == published_at
+        h.bridge._cycle()                 # still asks for a scan
+    assert stub.want_scan == [True, True, True]
+
+
+def test_shutdown_cleans_up_when_disconnected(h, monkeypatch):
+    """Regression: after a transient disconnect (backend None) the bridge exited without
+    restoring CoppeliaSim's display or stopping the simulation it had started."""
+    from vr_robot_pkg import coppelia_bridge_node as cbn
+    calls = []
+    monkeypatch.setattr(cbn.CoppeliaBackend, 'shutdown',
+                        lambda self, stop, restore, close_main=True:
+                        calls.append((self.host, stop, restore)))
+    with h.bridge.backend_lock:
+        h.bridge.backend = None
+        h.bridge.connected = False
+        h.bridge.mock = False
+        h.bridge.host = '192.0.2.1'
+        h.bridge.sim_started_by_bridge = True
+        h.bridge.display_to_restore = True
+    h.bridge.shutdown_backend()
+    assert calls == [('192.0.2.1', True, True)]
+    # The fixture's own shutdown must not try to reach the fake host.
+    h.bridge.mock, h.bridge.sim_started_by_bridge, h.bridge.display_to_restore = True, False, None
+
+
+def test_abort_stops_connect_before_any_remote_call():
+    """Shutdown sets the abort event: a connect in a worker thread must not start another
+    Remote API call (each can block for the full timeout while the lock is held)."""
+    import threading
+    from vr_robot_pkg.coppelia_bridge_node import CoppeliaBackend, SimDisconnected
+
+    class Log:
+        def warning(self, *_a, **_k):
+            pass
+        info = warning
+    abort = threading.Event()
+    abort.set()
+    backend = CoppeliaBackend('192.0.2.1', 23000, '/myRobot', 10000, Log(), abort)
+    t0 = time.monotonic()
+    with pytest.raises(SimDisconnected):
+        backend.connect(start_simulation=True)
+    assert time.monotonic() - t0 < 1.0
+    assert backend.started_simulation is False
+    assert backend.client is None

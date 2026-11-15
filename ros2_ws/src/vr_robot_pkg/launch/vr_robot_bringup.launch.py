@@ -14,6 +14,7 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -33,8 +34,10 @@ def generate_launch_description():
     use_tcp_endpoint = LaunchConfiguration('use_tcp_endpoint')
     tcp_port = LaunchConfiguration('tcp_port')
     use_rviz = LaunchConfiguration('use_rviz')
-    map_name = LaunchConfiguration('map')
-    maps_dir = LaunchConfiguration('maps_dir')
+    # Parameter substitutions are parsed as YAML: force strings, so that e.g. map:=2026 or
+    # map:=on does not reach the node as an int/bool (InvalidParameterTypeException).
+    map_name = ParameterValue(LaunchConfiguration('map'), value_type=str)
+    maps_dir = ParameterValue(LaunchConfiguration('maps_dir'), value_type=str)
 
     args = [
         DeclareLaunchArgument('mock_mode', default_value='false',
@@ -67,7 +70,7 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'mock_mode': mock_mode,
-            'coppelia_host': coppelia_host,
+            'coppelia_host': ParameterValue(coppelia_host, value_type=str),
             'camera_enabled': camera_enabled,
             'coppelia_display': coppelia_display,
         }],

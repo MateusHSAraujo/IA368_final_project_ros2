@@ -104,7 +104,7 @@ Robot: Pioneer P3-DX, wheel radius 0.0975 m, wheelbase 0.331 m, half-width about
 | `/map` | `nav_msgs/OccupancyGrid` | `map` | subscribe | slam_toolbox, republished about every 5 s; transient_local. **Size and origin change while mapping (grid grows): re-create the table texture on every message.** Values -1 unknown, 0 free, 100 occupied. Row-major, row 0 = lowest y. |
 | `/hmi/robot_pose` | `geometry_msgs/PoseStamped` | `map` (frame_id `odom` until SLAM publishes `map->odom`: check `frame_id`) | subscribe | 10 Hz. For the table mini-avatar (the 3D twin robot already moves through the Stage 1 ZMQ pose stream). |
 | `/plan` | `nav_msgs/Path` | `map` | subscribe | Nav2 global plan, only while navigating. |
-| `/myRobot/scan` | `sensor_msgs/LaserScan` | `laser_link` | subscribe | 452 beams, -90 deg to +90.4 deg, step 0.4 deg, `inf` = no hit. 7-8 Hz. |
+| `/myRobot/scan` | `sensor_msgs/LaserScan` | `laser_link` | subscribe | 452 beams, -90 deg to +90.4 deg, step 0.4 deg, `inf` = no hit. About 9 Hz (10 Hz target). |
 | `/myRobot/odom` | `nav_msgs/Odometry` | `odom` -> `base_link` | subscribe | Ground truth. 12-15 Hz. |
 | `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | `camera_optical_frame` | subscribe | JPEG 320x240, about 8 Hz, about 4-8 KB, **only while enabled**. |
 | `/camera/enable` | `std_msgs/Bool` | - | publish | `true` when the teleop panel opens, `false` when it closes. Camera is disabled by default. |
@@ -128,7 +128,7 @@ Implemented by `mission_supervisor`. Unity is the only client; the supervisor is
 | `/hmi/mission_cmd` | `std_msgs/String` | Unity -> supervisor | `PAUSE` / `RESUME` / `CANCEL`. Nav2 has no native pause: PAUSE cancels the Nav2 goal and stores the remaining poses; RESUME resends them. Unknown commands only change `message`. |
 | `/hmi/mission_state` | `std_msgs/String` (JSON) | supervisor -> Unity | Published on change and every 1 s. QoS transient_local (volatile subscribers such as ROS-TCP-Endpoint get the 1 s republish). `{"state": "IDLE"\|"NAVIGATING"\|"PAUSED"\|"SUCCEEDED"\|"FAILED"\|"CANCELED", "mode": "goal"\|"path"\|null, "remaining": n, "message": "..."}` |
 | `/hmi/keepout_stroke` | `geometry_msgs/PolygonStamped` (`map`) | Unity -> supervisor | One painted stroke = ordered points (`x`, `y` in meters, `z` = brush radius in meters). Dilated by `robot_half_width` (0.21 m). Consecutive points are joined by capsules, so the brush is continuous between points. Cumulative; a message with zero points clears all zones. Rasterized into `/keepout_filter_mask`; saved with maps. |
-| `/hmi/map_cmd` | `std_msgs/String` | Unity -> supervisor | `SAVE <name>` / `LOAD <name>` / `RESET`. Names `[A-Za-z0-9_-]{1,40}`. SAVE overwrites. RESET = slam_toolbox reset: mapping restarts from scratch and keepout zones are cleared. Commands sent while another map operation is running are rejected (`ok=false`). |
+| `/hmi/map_cmd` | `std_msgs/String` | Unity -> supervisor | `SAVE <name>` / `LOAD <name>` / `RESET`. Names `[A-Za-z0-9_-]{1,40}`. SAVE overwrites. RESET = slam_toolbox reset: mapping restarts from scratch and keepout zones are cleared. Commands sent while another map operation is running are rejected (`ok=false`). If slam_toolbox does not answer within 30 s the command reports `ok=false`, but a late answer is still applied. |
 | `/hmi/map_state` | `std_msgs/String` (JSON) | supervisor -> Unity | Published on change and every 1 s, transient_local: `{"state": "READY"\|"BUSY", "map": "<name>"\|null, "maps": ["scene_house", ...], "ok": true\|false, "message": "..."}`. `map` = last saved/loaded map; `maps` = maps available on disk; `ok`/`message` = result of the last command. |
 
 Mission behaviour:
@@ -139,7 +139,7 @@ Mission behaviour:
 | Teleop | A nonzero Twist on `/cmd_vel_teleop` (\|linear.x\| or \|angular.z\| > 0.01) auto-pauses an active mission. `message`: `paused (teleop)`. |
 | RESUME | Resends the stored poses. |
 | CANCEL | Works from NAVIGATING or PAUSED. `message`: `canceled by operator`. |
-| New goal or path | While NAVIGATING or PAUSED, replaces the mission. |
+| New goal or path | While NAVIGATING or PAUSED, replaces the mission. The old Nav2 goal is canceled and the new one is sent once Nav2 has ended it (bt_navigator rejects a goal on the other action while one is running; parameter `cancel_timeout`, 5 s, sends it anyway). |
 | `remaining` | Poses left while NAVIGATING, stored poses while PAUSED, else 0. |
 
 Example `message` values: `goal reached`, `paused (operator)`, `paused (teleop)`, `canceled by operator`, `map loaded`, `navigation failed: ...`, `Nav2 action server /navigate_to_pose not available`.
@@ -150,7 +150,7 @@ Example `message` values: `goal reached`, `paused (operator)`, `paused (teleop)`
 |---|---|
 | Folder | `<repo>/maps/` (committed; found from the install path in `<repo>/ros2_ws/install/...`). Launch arg `maps_dir:=<path>` overrides; fallback `~/.ros/vr_robot_maps` if the repo cannot be found. |
 | Reference map | `scene_house`: the whole house. |
-| LOAD | Cancels any active mission (`message`: `map loaded`). Calls slam_toolbox deserialize at the robot's current odom pose: odometry is ground truth and `map -> odom` starts as identity, so a saved map frame equals the world frame and no relocalization is needed. Restores the keepout zones saved with the map. slam_toolbox keeps mapping on top of the loaded map; the full map shows on `/map` within about 5 s (`map_update_interval`). |
+| LOAD | Cancels any active mission (`message`: `map loaded`). Waits until the robot is stopped (odom speed < 0.01 m/s and 0.01 rad/s for 0.5 s; `message`: `LOAD <name>: waiting for the robot to stop`, fails after 10 s): slam_toolbox applies the given pose to the next scan it processes, so motion in between would offset `map -> odom` for the rest of the session. Then calls slam_toolbox deserialize at the robot's current odom pose: odometry is ground truth and `map -> odom` starts as identity, so a saved map frame equals the world frame and no relocalization is needed. Restores the keepout zones saved with the map. slam_toolbox keeps mapping on top of the loaded map; the full map shows on `/map` within about 5 s (`map_update_interval`). |
 | SAVE files | `<name>.posegraph` + `<name>.data` (slam_toolbox pose graph, what LOAD uses); `<name>.pgm` + `<name>.yaml` (map image, nav2 map_server format, written from the last `/map`); `<name>.keepout.json` (keepout strokes). |
 
 slam_toolbox's own `/slam_toolbox/save_map` service fails in this setup (its map_saver times out waiting for `/map`); the supervisor writes the image itself.
@@ -177,7 +177,7 @@ ROS-TCP-Connector handshake: endpoint v0.7.0, protocol ROS2.
 |---|---|
 | Bridge cycle | 13-19 Hz (one exchange per sim step) |
 | `/myRobot/odom` | 12-15 Hz |
-| `/myRobot/scan` | 7-8 Hz |
+| `/myRobot/scan` | About 9 Hz (10 Hz target) |
 | Camera (when enabled) | 7-8 Hz |
 | Simulation speed | about 0.7-0.87x real time (below real time: plan for it in timing and timeouts) |
 | Nav goals verified | between dining room, living room and corridor, e.g. (2.4,-1.5), (3.3,-1.7), (6.2,0.7), (2.5,0.6); NavigateThroughPoses works |
