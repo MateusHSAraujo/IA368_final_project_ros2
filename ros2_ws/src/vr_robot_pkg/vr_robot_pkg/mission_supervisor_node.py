@@ -79,6 +79,10 @@ class MissionSupervisorNode(Node):
         # Publishers. The state topics are latched for ROS tools; ROS-TCP-Endpoint subscribes
         # as volatile and gets the 1 Hz republish.
         self.mask_pub = self.create_publisher(OccupancyGrid, '/keepout_filter_mask', LATCHED)
+        # Volatile copy for clients that cannot receive transient_local (ROS-TCP-Endpoint).
+        self.mask_copy_pub = self.create_publisher(OccupancyGrid, '/hmi/keepout_mask', 1)
+        # Volatile copy of /map (slam_toolbox only publishes it when the map changes).
+        self.map_copy_pub = self.create_publisher(OccupancyGrid, '/hmi/map', 1)
         self.mission_pub = self.create_publisher(String, '/hmi/mission_state', LATCHED)
         self.map_state_pub = self.create_publisher(String, '/hmi/map_state', LATCHED)
 
@@ -117,6 +121,7 @@ class MissionSupervisorNode(Node):
 
         # Keepout state
         self.mask = km.empty_mask(self.spec)
+        self.mask_msg = None      # last built mask message, republished periodically
         self.strokes = []         # persisted with the map: lists of (x, y, r)
 
         # Map state
@@ -137,6 +142,13 @@ class MissionSupervisorNode(Node):
         self._last_map_json = None
 
         self.create_timer(float(p('state_period', 1.0).value), self.on_state_timer)
+        # Periodic republish of the volatile mask copy only (never /keepout_filter_mask).
+        republish = float(p('keepout_republish_period', 2.0).value)
+        if republish > 0.0:
+            self.create_timer(republish, self.republish_mask_copy)
+        map_republish = float(p('map_republish_period', 5.0).value)
+        if map_republish > 0.0:
+            self.create_timer(map_republish, self.republish_map_copy)
         self.initial_map_timer = (None if self.initial_map_done
                                   else self.create_timer(1.0, self.try_initial_map))
         self.get_logger().info(f'Maps directory: {self.maps_dir}')
@@ -230,6 +242,11 @@ class MissionSupervisorNode(Node):
 
     def on_map(self, msg):
         self.last_map = msg
+        self.map_copy_pub.publish(msg)
+
+    def republish_map_copy(self):
+        if self.last_map is not None:
+            self.map_copy_pub.publish(self.last_map)
 
     def on_teleop(self, msg):
         if self.state != ml.NAVIGATING:
@@ -430,10 +447,16 @@ class MissionSupervisorNode(Node):
         msg.info.origin.position.y = self.spec.origin_y
         msg.info.origin.orientation.w = 1.0
         msg.data = km.to_occupancy_data(self.mask)
+        self.mask_msg = msg
         self.mask_pub.publish(msg)
+        self.mask_copy_pub.publish(msg)
         self.get_logger().info(
             f'Keepout mask: {int((self.mask == km.KEEPOUT).sum())} cells, '
             f'{len(self.strokes)} strokes')
+
+    def republish_mask_copy(self):
+        if self.mask_msg is not None:
+            self.mask_copy_pub.publish(self.mask_msg)
 
     # ---------------------------------------------------------------- maps
     def on_map_cmd(self, msg):

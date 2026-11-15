@@ -101,7 +101,7 @@ Robot: Pioneer P3-DX, wheel radius 0.0975 m, wheelbase 0.331 m, half-width about
 
 | Topic | Type | Frame | Unity | Notes |
 |---|---|---|---|---|
-| `/map` | `nav_msgs/OccupancyGrid` | `map` | subscribe | slam_toolbox, republished about every 5 s; transient_local. **Size and origin change while mapping (grid grows): re-create the table texture on every message.** Values -1 unknown, 0 free, 100 occupied. Row-major, row 0 = lowest y. |
+| `/map` | `nav_msgs/OccupancyGrid` | `map` | subscribe | slam_toolbox, transient_local; published only when the map updates (not while the robot is stationary). **Unity must subscribe to `/hmi/map` instead** (volatile copy; ROS-TCP-Endpoint cannot receive transient_local). **Size and origin change while mapping (grid grows): re-create the table texture on every message.** Values -1 unknown, 0 free, 100 occupied. Row-major, row 0 = lowest y. |
 | `/hmi/robot_pose` | `geometry_msgs/PoseStamped` | `map` (frame_id `odom` until SLAM publishes `map->odom`: check `frame_id`) | subscribe | 10 Hz. For the table mini-avatar (the 3D twin robot already moves through the Stage 1 ZMQ pose stream). |
 | `/plan` | `nav_msgs/Path` | `map` | subscribe | Nav2 global plan, only while navigating. |
 | `/myRobot/scan` | `sensor_msgs/LaserScan` | `laser_link` | subscribe | 452 beams, -90 deg to +90.4 deg, step 0.4 deg, `inf` = no hit. About 9 Hz (10 Hz target). |
@@ -110,7 +110,7 @@ Robot: Pioneer P3-DX, wheel radius 0.0975 m, wheelbase 0.331 m, half-width about
 | `/camera/enable` | `std_msgs/Bool` | - | publish | `true` when the teleop panel opens, `false` when it closes. Camera is disabled by default. |
 | `/cmd_vel` | `geometry_msgs/Twist` | - | publish (Stage 3 testing only) | `linear.x` m/s, `angular.z` rad/s. Bridge watchdog stops the robot 0.5 s after the last message: publish at >= 10 Hz. Nav2 also publishes here while navigating (collision_monitor). Stage 6 inserts `twist_mux`; Unity must then publish on `/cmd_vel_teleop` instead. |
 | `/myRobot/bridge_status` | `std_msgs/String` | - | subscribe | `connected` / `waiting-for-simulation` / `disconnected` / `mock`. Republished every 1 s (also transient_local). |
-| `/keepout_filter_mask` | `nav_msgs/OccupancyGrid` | `map` | subscribe (optional) | transient_local. Fixed grid: resolution 0.05, origin (-2.5, -4.25), 310 x 210 cells (house bounding box); 100 = keepout. Published by `mission_supervisor`. **Unity must NOT publish it** (ROS-TCP-Endpoint cannot publish transient_local). |
+| `/keepout_filter_mask` | `nav_msgs/OccupancyGrid` | `map` | subscribe (optional) | transient_local. Fixed grid: resolution 0.05, origin (-2.5, -4.25), 310 x 210 cells (house bounding box); 100 = keepout. Published by `mission_supervisor`. **Unity must NOT publish it** (ROS-TCP-Endpoint cannot publish transient_local) and should subscribe to `/hmi/keepout_mask` instead (volatile copy). |
 | `/keepout_mask_test` | `geometry_msgs/PolygonStamped` | `map` | debug only | Debug input of `mission_supervisor`: polygon in meters, cumulative; empty polygon clears everything. Not saved with maps. `Point32` fields must be floats. |
 
 Nav2 actions `/navigate_to_pose` and `/navigate_through_poses` exist, but Unity cannot call ROS actions through ROS-TCP-Connector: use the `/hmi` topics below.
@@ -128,6 +128,8 @@ Implemented by `mission_supervisor`. Unity is the only client; the supervisor is
 | `/hmi/mission_cmd` | `std_msgs/String` | Unity -> supervisor | `PAUSE` / `RESUME` / `CANCEL`. Nav2 has no native pause: PAUSE cancels the Nav2 goal and stores the remaining poses; RESUME resends them. Unknown commands only change `message`. |
 | `/hmi/mission_state` | `std_msgs/String` (JSON) | supervisor -> Unity | Published on change and every 1 s. QoS transient_local (volatile subscribers such as ROS-TCP-Endpoint get the 1 s republish). `{"state": "IDLE"\|"NAVIGATING"\|"PAUSED"\|"SUCCEEDED"\|"FAILED"\|"CANCELED", "mode": "goal"\|"path"\|null, "remaining": n, "message": "..."}` |
 | `/hmi/keepout_stroke` | `geometry_msgs/PolygonStamped` (`map`) | Unity -> supervisor | One painted stroke = ordered points (`x`, `y` in meters, `z` = brush radius in meters). Dilated by `robot_half_width` (0.21 m). Consecutive points are joined by capsules, so the brush is continuous between points. Cumulative; a message with zero points clears all zones. Rasterized into `/keepout_filter_mask`; saved with maps. |
+| `/hmi/keepout_mask` | `nav_msgs/OccupancyGrid` (`map`) | supervisor -> Unity | Volatile copy of `/keepout_filter_mask`, published on change and every 2 s (parameter `keepout_republish_period`, <= 0 disables), for clients that cannot receive transient_local such as ROS-TCP-Endpoint. Unity subscribes to this one. |
+| `/hmi/map` | `nav_msgs/OccupancyGrid` (`map`) | supervisor -> Unity | Volatile copy of `/map`, published on every new map and every 5 s (parameter `map_republish_period`, <= 0 disables), for clients that cannot receive transient_local such as ROS-TCP-Endpoint. Unity subscribes to this one. |
 | `/hmi/map_cmd` | `std_msgs/String` | Unity -> supervisor | `SAVE <name>` / `LOAD <name>` / `RESET`. Names `[A-Za-z0-9_-]{1,40}`. SAVE overwrites. RESET = slam_toolbox reset: mapping restarts from scratch and keepout zones are cleared. Commands sent while another map operation is running are rejected (`ok=false`). If slam_toolbox does not answer within 30 s the command reports `ok=false`, but a late answer is still applied. |
 | `/hmi/map_state` | `std_msgs/String` (JSON) | supervisor -> Unity | Published on change and every 1 s, transient_local: `{"state": "READY"\|"BUSY", "map": "<name>"\|null, "maps": ["scene_house", ...], "ok": true\|false, "message": "..."}`. `map` = last saved/loaded map; `maps` = maps available on disk; `ok`/`message` = result of the last command. |
 
@@ -195,7 +197,7 @@ ROS-TCP-Connector handshake: endpoint v0.7.0, protocol ROS2.
 ## Verification
 
 ```bash
-pytest tests/        # 197 offline tests: math, network scripts, keepout mask, map store, mission logic,
+pytest tests/        # 211 offline tests: math, network scripts, keepout mask, map store, mission logic,
                      # bridge in mock mode, mission supervisor (mock Nav2 and slam_toolbox)
 # Live (stack running against CoppeliaSim):
 python3 -u tests/live/check_live_stack.py rates drive camera keepout nav through map \

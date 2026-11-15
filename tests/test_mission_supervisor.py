@@ -198,6 +198,11 @@ class Harness:
                                    lambda m: self.map_states.append(json.loads(m.data)), LATCHED)
             pr.create_subscription(OccupancyGrid, '/keepout_filter_mask',
                                    self.masks.append, LATCHED)
+            self.mask_copies = []
+            pr.create_subscription(OccupancyGrid, '/hmi/keepout_mask',
+                                   self.mask_copies.append, 10)
+            self.map_copies = []
+            pr.create_subscription(OccupancyGrid, '/hmi/map', self.map_copies.append, 10)
             self.goal_pub = pr.create_publisher(PoseStamped, '/hmi/goal', 10)
             self.path_pub = pr.create_publisher(Path, '/hmi/path', 10)
             self.mcmd_pub = pr.create_publisher(String, '/hmi/mission_cmd', 10)
@@ -552,6 +557,33 @@ def test_unknown_mission_command(make_h):
     h.mission_cmd('DANCE')
     assert h.wait_mission(lambda s: 'unknown' in s['message'])
     assert h.mission[-1]['state'] == 'IDLE'
+
+
+def test_keepout_mask_volatile_copy(make_h):
+    h = make_h(params=['keepout_republish_period:=0.2'])
+    h.stroke([(0.5, 0.5, 0.1)])
+    h.wait_mask(lambda m: (m == 100).any())
+    # The copy of the stroke mask arrives with the same data as the latched mask.
+    assert h.spin_until(
+        lambda: h.mask_copies and h.mask_copies[-1].data == h.masks[-1].data
+        and any(v == 100 for v in h.mask_copies[-1].data), 5.0)
+    # Periodic republish: more copies without a new stroke, /keepout_filter_mask untouched.
+    n_copies, n_masks = len(h.mask_copies), len(h.masks)
+    assert h.spin_until(lambda: len(h.mask_copies) >= n_copies + 2, 5.0)
+    assert len(h.masks) == n_masks
+    assert h.mask_copies[-1].data == h.masks[-1].data
+
+
+def test_map_volatile_copy(make_h):
+    h = make_h(params=['map_republish_period:=0.2'])
+    # The map published by the harness arrives on /hmi/map with identical data.
+    assert h.spin_until(lambda: h.map_copies, 5.0)
+    assert list(h.map_copies[-1].data) == list(h.sup.last_map.data)
+    assert h.map_copies[-1].info.width == 4 and h.map_copies[-1].info.height == 3
+    # Periodic republish without new /map messages.
+    n = len(h.map_copies)
+    assert h.spin_until(lambda: len(h.map_copies) >= n + 2, 5.0)
+    assert list(h.map_copies[-1].data) == list(h.sup.last_map.data)
 
 
 # ---------------------------------------------------------------------- 13
