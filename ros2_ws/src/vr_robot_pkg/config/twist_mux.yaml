@@ -1,0 +1,21 @@
+# twist_mux routing (Unity teleop overrides Nav2):
+#   Nav2 controller -> cmd_vel_nav -> velocity_smoother -> cmd_vel_smoothed
+#     -> collision_monitor -> cmd_vel_nav_safe -> twist_mux (priority 10)
+#   Unity -> /cmd_vel_teleop -> twist_mux (priority 100)
+#   twist_mux output -> /cmd_vel -> coppelia_bridge
+# (cmd_vel_nav is already used by Nav2 Jazzy for the raw controller output, hence cmd_vel_nav_safe.)
+#
+# On timeout twist_mux publishes nothing (no zero Twist): the bridge's 0.5 s watchdog is what
+# stops the robot, so teleop clients must publish one zero Twist on release. No locks.
+twist_mux:
+  ros__parameters:
+    use_stamped: false   # Nav2 Jazzy and the bridge use geometry_msgs/Twist
+    topics:
+      navigation:
+        topic: cmd_vel_nav_safe
+        timeout: 0.5
+        priority: 10
+      teleop:
+        topic: cmd_vel_teleop
+        timeout: 0.5
+        priority: 100

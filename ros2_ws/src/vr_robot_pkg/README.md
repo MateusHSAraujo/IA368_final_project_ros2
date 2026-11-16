@@ -2,7 +2,7 @@
 
 ROS 2 Jazzy package of the IA368 final project (ROS 2 side, WSL2). It bridges CoppeliaSim to ROS 2, runs the mission supervisor (missions, keepout zones, saved maps), and brings up SLAM, Nav2 and the ROS-TCP-Endpoint that Unity connects to.
 
-This file is also the **interface contract** for the Unity side (ROS-TCP-Connector, Stages 5 and 6). Sections marked **RESERVED** are fixed contracts whose ROS-side implementation does not exist yet.
+This file is also the **interface contract** for the Unity side (ROS-TCP-Connector, Stages 5 and 6).
 
 ## Overview
 
@@ -12,10 +12,11 @@ This file is also the **interface contract** for the Unity side (ROS-TCP-Connect
 |---|---|
 | `coppelia_bridge` | CoppeliaSim ZMQ Remote API (Windows host, port 23000) <-> ROS: scan, odom, TF, camera, `cmd_vel`. |
 | `mission_supervisor` | The only node Unity talks to for missions, keepout zones and saved maps. Only Nav2 action client; publishes `/keepout_filter_mask`; client of the slam_toolbox map services. |
+| `twist_mux` | Muxes Nav2 and Unity teleop into `/cmd_vel`; teleop wins (see Teleop). |
 | `costmap_filter_info_server` + `lifecycle_manager_costmap_filters` | Nav2 Keepout Filter plumbing (started 3 s late on purpose). |
 | slam_toolbox (online async) | Mapping; publishes `/map` and `map -> odom`. |
 | Nav2 `navigation_launch.py` | Started after `nav2_delay` (8 s). |
-| ROS-TCP-Endpoint (v0.7.0, protocol ROS2) | Listens on `0.0.0.0:10000`; Unity connects here. |
+| ROS-TCP-Endpoint (v0.7.0, protocol ROS2) | Listens on `0.0.0.0:10000`; Unity connects here. Respawns 2 s after an exit (it sometimes exits when Unity leaves Play mode). |
 | RViz | Optional. |
 
 Bridge behaviour: starts the CoppeliaSim simulation if it is stopped and stops it on exit (only if it started it). It turns CoppeliaSim window rendering off while running (about 0.44x -> 0.87x real time in scene_house) and restores it on exit; `coppelia_display:=true` keeps rendering on.
@@ -108,7 +109,7 @@ Robot: Pioneer P3-DX, wheel radius 0.0975 m, wheelbase 0.331 m, half-width about
 | `/myRobot/odom` | `nav_msgs/Odometry` | `odom` -> `base_link` | subscribe | Ground truth. 12-15 Hz. |
 | `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | `camera_optical_frame` | subscribe | JPEG 320x240, about 8 Hz, about 4-8 KB, **only while enabled**. |
 | `/camera/enable` | `std_msgs/Bool` | - | publish | `true` when the teleop panel opens, `false` when it closes. Camera is disabled by default. |
-| `/cmd_vel` | `geometry_msgs/Twist` | - | publish (Stage 3 testing only) | `linear.x` m/s, `angular.z` rad/s. Bridge watchdog stops the robot 0.5 s after the last message: publish at >= 10 Hz. Nav2 also publishes here while navigating (collision_monitor). Stage 6 inserts `twist_mux`; Unity must then publish on `/cmd_vel_teleop` instead. |
+| `/cmd_vel` | `geometry_msgs/Twist` | - | - | `linear.x` m/s, `angular.z` rad/s. Bridge watchdog stops the robot 0.5 s after the last message: publish at >= 10 Hz. Published by `twist_mux` (Nav2 and teleop, see Teleop). Unity never publishes it; Stage 3 manual testing can still publish directly while idle. |
 | `/myRobot/bridge_status` | `std_msgs/String` | - | subscribe | `connected` / `waiting-for-simulation` / `disconnected` / `mock`. Republished every 1 s (also transient_local). |
 | `/keepout_filter_mask` | `nav_msgs/OccupancyGrid` | `map` | subscribe (optional) | transient_local. Fixed grid: resolution 0.05, origin (-2.5, -4.25), 310 x 210 cells (house bounding box); 100 = keepout. Published by `mission_supervisor`. **Unity must NOT publish it** (ROS-TCP-Endpoint cannot publish transient_local) and should subscribe to `/hmi/keepout_mask` instead (volatile copy). |
 | `/keepout_mask_test` | `geometry_msgs/PolygonStamped` | `map` | debug only | Debug input of `mission_supervisor`: polygon in meters, cumulative; empty polygon clears everything. Not saved with maps. `Point32` fields must be floats. |
@@ -126,7 +127,7 @@ Implemented by `mission_supervisor`. Unity is the only client; the supervisor is
 | `/hmi/goal` | `geometry_msgs/PoseStamped` (`map`) | Unity -> supervisor | Point-and-click goal -> NavigateToPose. If the quaternion is all zeros, the goal faces the direction of travel from the robot. The header stamp is ignored (the latest transform is used). |
 | `/hmi/path` | `nav_msgs/Path` (`map`) | Unity -> supervisor | Painted path -> NavigateThroughPoses. Thinned to waypoints >= 0.3 m apart (parameter `waypoint_spacing`): points within 0.3 m of the robot at the start are skipped, the final point is always the last waypoint, and each waypoint faces the next one. |
 | `/hmi/mission_cmd` | `std_msgs/String` | Unity -> supervisor | `PAUSE` / `RESUME` / `CANCEL`. Nav2 has no native pause: PAUSE cancels the Nav2 goal and stores the remaining poses; RESUME resends them. Unknown commands only change `message`. |
-| `/hmi/mission_state` | `std_msgs/String` (JSON) | supervisor -> Unity | Published on change and every 1 s. QoS transient_local (volatile subscribers such as ROS-TCP-Endpoint get the 1 s republish). `{"state": "IDLE"\|"NAVIGATING"\|"PAUSED"\|"SUCCEEDED"\|"FAILED"\|"CANCELED", "mode": "goal"\|"path"\|null, "remaining": n, "message": "..."}` |
+| `/hmi/mission_state` | `std_msgs/String` (JSON) | supervisor -> Unity | Published on change and every 1 s. QoS transient_local (volatile subscribers such as ROS-TCP-Endpoint get the 1 s republish). `{"state": "IDLE"\|"NAVIGATING"\|"PAUSED"\|"SUCCEEDED"\|"FAILED"\|"CANCELED", "mode": "goal"\|"path"\|null, "remaining": n, "message": "...", "teleop": true\|false}`. `teleop` is true while a nonzero `/cmd_vel_teleop` Twist arrived within `teleop_active_timeout` (0.5 s), and also when there is no mission; it turns false within about 0.6 s after the last nonzero command. |
 | `/hmi/keepout_stroke` | `geometry_msgs/PolygonStamped` (`map`) | Unity -> supervisor | One painted stroke = ordered points (`x`, `y` in meters, `z` = brush radius in meters). Dilated by `robot_half_width` (0.21 m). Consecutive points are joined by capsules, so the brush is continuous between points. Cumulative; a message with zero points clears all zones. Rasterized into `/keepout_filter_mask`; saved with maps. |
 | `/hmi/keepout_mask` | `nav_msgs/OccupancyGrid` (`map`) | supervisor -> Unity | Volatile copy of `/keepout_filter_mask`, published on change and every 2 s (parameter `keepout_republish_period`, <= 0 disables), for clients that cannot receive transient_local such as ROS-TCP-Endpoint. Unity subscribes to this one. |
 | `/hmi/map` | `nav_msgs/OccupancyGrid` (`map`) | supervisor -> Unity | Volatile copy of `/map`, published on every new map and every 5 s (parameter `map_republish_period`, <= 0 disables), for clients that cannot receive transient_local such as ROS-TCP-Endpoint. Unity subscribes to this one. |
@@ -138,13 +139,25 @@ Mission behaviour:
 | Situation | Behaviour |
 |---|---|
 | PAUSE | Cancels the Nav2 goal. Stores the remaining poses: path = the last `remaining` waypoints from Nav2 feedback; goal = the goal. `message`: `paused (operator)`. |
-| Teleop | A nonzero Twist on `/cmd_vel_teleop` (\|linear.x\| or \|angular.z\| > 0.01) auto-pauses an active mission. `message`: `paused (teleop)`. |
+| Teleop | A nonzero Twist on `/cmd_vel_teleop` (\|linear.x\| or \|angular.z\| > 0.01) auto-pauses an active mission. `message`: `paused (teleop)`. Sets the `teleop` flag of `/hmi/mission_state`. |
 | RESUME | Resends the stored poses. |
 | CANCEL | Works from NAVIGATING or PAUSED. `message`: `canceled by operator`. |
 | New goal or path | While NAVIGATING or PAUSED, replaces the mission. The old Nav2 goal is canceled and the new one is sent once Nav2 has ended it (bt_navigator rejects a goal on the other action while one is running; parameter `cancel_timeout`, 5 s, sends it anyway). |
 | `remaining` | Poses left while NAVIGATING, stored poses while PAUSED, else 0. |
 
 Example `message` values: `goal reached`, `paused (operator)`, `paused (teleop)`, `canceled by operator`, `map loaded`, `navigation failed: ...`, `Nav2 action server /navigate_to_pose not available`.
+
+### Teleop (Stage 6)
+
+| Topic | Type | Direction | Contract |
+|---|---|---|---|
+| `/cmd_vel_teleop` | `geometry_msgs/Twist` | Unity -> `twist_mux` | Manual driving, priority 100 (above Nav2). >= 10 Hz while the deadman (grip) is held; one zero Twist on release. Unity clamps `\|linear.x\|` <= 0.5 m/s and `\|angular.z\|` <= 1.5 rad/s itself (no ROS-side clamp). Unity never publishes `/cmd_vel`. |
+
+Routing: `controller` -> `cmd_vel_nav` -> `velocity_smoother` -> `cmd_vel_smoothed` -> `collision_monitor` -> `cmd_vel_nav_safe` -> `twist_mux` -> `/cmd_vel` -> `coppelia_bridge`. Teleop bypasses `collision_monitor` and the keepout zones (full manual authority for rescue).
+
+`twist_mux` (`config/twist_mux.yaml`, `use_stamped: false`) is always started, also with `use_nav2:=false`: `navigation` (`cmd_vel_nav_safe`, priority 10) and `teleop` (priority 100), both with a 0.5 s timeout. On timeout it publishes nothing; the bridge watchdog then stops the robot, so the zero Twist on release stops it at once.
+
+Nav2's `docking_server` also advertises `/cmd_vel` (`navigation_launch.py` does not remap it), but it publishes only during docking actions, which this project never sends.
 
 ### Saved maps
 
@@ -156,12 +169,6 @@ Example `message` values: `goal reached`, `paused (operator)`, `paused (teleop)`
 | SAVE files | `<name>.posegraph` + `<name>.data` (slam_toolbox pose graph, what LOAD uses); `<name>.pgm` + `<name>.yaml` (map image, nav2 map_server format, written from the last `/map`); `<name>.keepout.json` (keepout strokes). |
 
 slam_toolbox's own `/slam_toolbox/save_map` service fails in this setup (its map_saver times out waiting for `/map`); the supervisor writes the image itself.
-
-### RESERVED for Stage 6 (contract fixed now, ROS side NOT implemented yet)
-
-| Topic | Type | Direction | Contract |
-|---|---|---|---|
-| `/cmd_vel_teleop` | `geometry_msgs/Twist` | Unity -> `twist_mux` | Higher priority than Nav2. >= 10 Hz while the deadman (grip) is held; stop publishing to release. The supervisor already auto-pauses an active mission when a nonzero Twist arrives here (see Mission behaviour). `twist_mux` priority routing is Stage 6. |
 
 ## Networking
 
@@ -197,12 +204,13 @@ ROS-TCP-Connector handshake: endpoint v0.7.0, protocol ROS2.
 ## Verification
 
 ```bash
-pytest tests/        # 211 offline tests: math, network scripts, keepout mask, map store, mission logic,
-                     # bridge in mock mode, mission supervisor (mock Nav2 and slam_toolbox)
+pytest tests/        # 219 offline tests: math, network scripts, keepout mask, map store, mission logic,
+                     # bridge in mock mode, mission supervisor (mock Nav2 and slam_toolbox), twist_mux (config and node)
 # Live (stack running against CoppeliaSim):
 python3 -u tests/live/check_live_stack.py rates drive camera keepout nav through map \
     --zone 2.4 -0.4 0.4 --goal 2.4 -1.5 --goal 3.3 -1.7 --goal 6.2 0.7
 python3 -u tests/live/check_live_stack.py hmi_goal hmi_path hmi_pause hmi_keepout hmi_map \
     --goal 2.4 -1.5 --goal 3.3 -1.7 --zone 2.4 -0.4 0.3
-python3 -u tests/live/check_tcp_endpoint.py   # acts like Unity through port 10000
+python3 -u tests/live/check_live_stack.py teleop --goal 2.4 -1.5   # Stage 6 teleop checks
+python3 -u tests/live/check_tcp_endpoint.py   # acts like Unity through port 10000 (also publishes /cmd_vel_teleop; --no-teleop skips it)
 ```

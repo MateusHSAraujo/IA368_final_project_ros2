@@ -6,7 +6,8 @@ node turns them into:
 * Nav2 actions: ``/hmi/goal`` -> NavigateToPose, ``/hmi/path`` -> NavigateThroughPoses
   (thinned to waypoints), ``/hmi/mission_cmd`` PAUSE / RESUME / CANCEL (Nav2 has no native
   pause: PAUSE cancels and keeps the remaining poses). A nonzero ``/cmd_vel_teleop`` command
-  auto-pauses an active mission. State on ``/hmi/mission_state`` (JSON). A new goal is
+  auto-pauses an active mission, and sets the ``teleop`` flag of
+  ``/hmi/mission_state`` while teleop commands keep arriving. State on ``/hmi/mission_state`` (JSON). A new goal is
   sent only after the previous one has ended in Nav2: bt_navigator aborts a goal on one
   action while the other is still running, and a cancel ends a pending goal on the same
   action too.
@@ -64,6 +65,8 @@ class MissionSupervisorNode(Node):
         self.dilation = float(p('robot_half_width', 0.21).value)
         self.waypoint_spacing = float(p('waypoint_spacing', 0.3).value)
         self.teleop_threshold = float(p('teleop_threshold', 0.01).value)
+        self.teleop_active_timeout = float(p('teleop_active_timeout', 0.5).value)
+        self.last_teleop_time = None
         self.maps_dir = ms.resolve_maps_dir(str(p('maps_dir', '').value or ''))
         self.initial_map = str(p('initial_map', '').value or '')
         self.service_timeout = float(p('service_timeout', 30.0).value)
@@ -142,6 +145,7 @@ class MissionSupervisorNode(Node):
         self._last_map_json = None
 
         self.create_timer(float(p('state_period', 1.0).value), self.on_state_timer)
+        self.create_timer(0.1, self.on_teleop_timer)
         # Periodic republish of the volatile mask copy only (never /keepout_filter_mask).
         republish = float(p('keepout_republish_period', 2.0).value)
         if republish > 0.0:
@@ -164,7 +168,8 @@ class MissionSupervisorNode(Node):
             remaining = len(self.resume_poses)
         else:
             remaining = 0
-        text = ml.mission_state_json(self.state, self.mode, remaining, self.message)
+        text = ml.mission_state_json(self.state, self.mode, remaining, self.message,
+                                    teleop=self.teleop_active())
         if force or text != self._last_mission_json:
             self._last_mission_json = text
             self.mission_pub.publish(String(data=text))
@@ -248,10 +253,20 @@ class MissionSupervisorNode(Node):
         if self.last_map is not None:
             self.map_copy_pub.publish(self.last_map)
 
+    def teleop_active(self):
+        return (self.last_teleop_time is not None
+                and time.monotonic() - self.last_teleop_time < self.teleop_active_timeout)
+
+    def on_teleop_timer(self):
+        self.publish_mission_state()
+
     def on_teleop(self, msg):
-        if self.state != ml.NAVIGATING:
-            return
-        if abs(msg.linear.x) > self.teleop_threshold or abs(msg.angular.z) > self.teleop_threshold:
+        moving = (abs(msg.linear.x) > self.teleop_threshold
+                  or abs(msg.angular.z) > self.teleop_threshold)
+        if moving:
+            self.last_teleop_time = time.monotonic()
+            self.publish_mission_state()
+        if moving and self.state == ml.NAVIGATING:
             self.pause('teleop')
 
     # ---------------------------------------------------------------- missions

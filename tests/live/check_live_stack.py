@@ -15,6 +15,11 @@ Mission supervisor (Stage 5) steps, driven only through the /hmi/* topics Unity 
         --goal 2.4 -1.5 --goal 3.3 -1.7 --zone 2.4 -0.4 0.3
     python3 -u tests/live/check_live_stack.py hmi_map --map-name my_map
 
+Teleop (Stage 6, twist_mux + auto-pause), needs a --goal far enough that the mission is still
+running after ~6 s of teleop (use --no-wait-goal to CANCEL instead of waiting for SUCCEEDED):
+
+    python3 -u tests/live/check_live_stack.py teleop --goal 2.4 -1.5 [--no-wait-goal]
+
 hmi_goal / hmi_pause use the first --goal (hmi_pause the farthest --goal from the robot, so
 there is something left to drive); hmi_path goes through all --goal points; hmi_keepout takes
 --zone x y r (a brush stroke of radius r); hmi_map takes --map-name (default live_check).
@@ -122,6 +127,9 @@ class Checker(Node):
         return p.position.x, p.position.y, 2 * math.atan2(p.orientation.z, p.orientation.w)
 
     def check_drive(self, v=0.2, w=0.0, seconds=2.0):
+        # Publishes straight on /cmd_vel. With twist_mux, /cmd_vel has another publisher (twist_mux),
+        # which only republishes Nav2/teleop output while they drive, so a direct publish still
+        # reaches the bridge when the robot is idle.
         self.wait_for_subscribers(self.cmd_pub)
         self.spin_for(0.5)
         x0, y0, a0 = self.pose()
@@ -386,6 +394,105 @@ class Checker(Node):
         self.cmd_pub.publish(Twist())
         self.spin_for(1.0)
 
+    # -- teleop (Stage 6: twist_mux + mission auto-pause) --------------------------------------
+    def _teleop_phase(self, twist, seconds, tail=1.5, watch=None):
+        """Publish `twist` on /cmd_vel_teleop at 10 Hz for `seconds`. Returns (mean odom v, mean odom w,
+        odom samples in the last `tail` s, seconds until a mission_state entry satisfied `watch` or None)."""
+        i, seen = len(self.mission_log), None
+        t0 = time.time()
+        next_pub, odom_mark = t0, None
+        while time.time() - t0 < seconds:
+            now = time.time()
+            if now >= next_pub:
+                self.teleop_pub.publish(twist)
+                next_pub += 0.1
+            if odom_mark is None and now - t0 >= seconds - tail:
+                odom_mark = len(self.odom)
+            rclpy.spin_once(self, timeout_sec=0.02)
+            while i < len(self.mission_log):
+                if watch and seen is None and watch(self.mission_log[i]):
+                    seen = time.time() - t0
+                i += 1
+        msgs = self.odom[odom_mark:] if odom_mark is not None else []
+        if not msgs:
+            return float('nan'), float('nan'), 0, seen
+        v = sum(m.twist.twist.linear.x for m in msgs) / len(msgs)
+        w = sum(m.twist.twist.angular.z for m in msgs) / len(msgs)
+        return v, w, len(msgs), seen
+
+    def check_teleop(self, goals, wait_goal=True):
+        # NOTE: this step pauses the running mission (teleop auto-pause) and resumes it afterwards.
+        # 1. /cmd_vel must have exactly one publisher: twist_mux (this checker's own publisher ignored).
+        self.spin_for(1.5)
+        # Nav2's docking_server publishes /cmd_vel directly (navigation_launch.py does not remap it),
+        # but only during a docking action, which this project never sends: it is an idle publisher.
+        idle = {'docking_server'}
+        pubs = sorted(p.node_name for p in self.get_publishers_info_by_topic('/cmd_vel')
+                      if p.node_name != self.get_name())
+        active = [n for n in pubs if n not in idle]
+        self.report('teleop /cmd_vel publishers', active == ['twist_mux'],
+                    f'publishers={pubs} (idle, ignored: {sorted(idle)})')
+        if not goals:
+            self.report('teleop', False, 'a --goal x y is required for the teleop step')
+            return
+        goal = goals[0]
+        if not self._hmi_ready(self.hmi_goal_pub, self.hmi_cmd_pub, self.teleop_pub):
+            self.report('teleop', False, 'mission_supervisor is not subscribed (goal/mission_cmd/cmd_vel_teleop)')
+            return
+        # 2. start a mission
+        mark, t0 = len(self.mission_log), time.time()
+        self.hmi_goal_pub.publish(self._goal(*goal))
+        i, _ = self._wait_mission('NAVIGATING', 20, mark, mode='goal')
+        self.report('teleop mission NAVIGATING', i is not None, f'goal {goal}')
+        if i is None:
+            return
+        # 3. rotate: angular.z = 0.6 for 2.5 s -> auto-pause and yaw rate
+        _, w, n, seen = self._teleop_phase(
+            Twist(angular=self._vec(0, 0, 0.6)), 2.5,
+            watch=lambda m: m.get('state') == 'PAUSED' and 'teleop' in m.get('message', '') and m.get('teleop') is True)
+        self.report('teleop auto-pause (PAUSED, "teleop", teleop=true)', seen is not None and seen <= 1.5,
+                    f'seen after {seen if seen is None else round(seen, 2)} s, last state={self.mission_log[-1] if self.mission_log else None}')
+        self.report('teleop rotation rate', n > 0 and abs(w - 0.6) <= 0.25, f'mean odom w={w:.3f} rad/s over {n} samples (cmd 0.6 +/- 0.25)')
+        # 4. drive forward
+        v, w, n, _ = self._teleop_phase(Twist(linear=self._vec(0.15)), 2.5)
+        self.report('teleop forward speed', n > 0 and abs(v - 0.15) <= 0.07, f'mean odom v={v:.3f} m/s over {n} samples (cmd 0.15 +/- 0.07)')
+        # 5. stop like the HMI: one zero Twist, then silence
+        mark = len(self.mission_log)
+        self.teleop_pub.publish(Twist())
+        end, stopped = time.time() + 1.5, False
+        while time.time() < end and not stopped:
+            rclpy.spin_once(self, timeout_sec=0.05)
+            t = self.odom[-1].twist.twist
+            stopped = abs(t.linear.x) < 0.02 and abs(t.angular.z) < 0.05
+        t = self.odom[-1].twist.twist
+        self.report('teleop robot stopped', stopped, f'v={t.linear.x:.3f} m/s w={t.angular.z:.3f} rad/s')
+        j, st = self._wait_log(self.mission_log, lambda m: m.get('teleop') is False, max(0.0, end - time.time()) + 1.5, mark)
+        self.report('teleop flag cleared', j is not None, f'state={st or (self.mission_log[-1] if self.mission_log else None)}')
+        # 6. RESUME (or CANCEL)
+        mark = len(self.mission_log)
+        if not wait_goal:
+            self.hmi_cmd_pub.publish(String(data='CANCEL'))
+            j, st = self._wait_mission('CANCELED', 10, mark)
+            self.report('teleop CANCEL -> CANCELED', j is not None, f'state={st}')
+            self.spin_for(1.0)
+            return
+        self.hmi_cmd_pub.publish(String(data='RESUME'))
+        j, st = self._wait_mission('NAVIGATING', 5, mark)
+        self.report('teleop RESUME -> NAVIGATING', j is not None, f'state={st}')
+        if j is None:
+            return
+        end, next_print, k = time.time() + 240, time.time() + 15, None
+        while time.time() < end and k is None:
+            k, _ = self._wait_mission('SUCCEEDED', 1.0, j + 1)
+            if time.time() >= next_print:
+                x, y, _ = self.pose()
+                print(f'       ... {time.time() - t0:.0f} s, at ({x:.2f}, {y:.2f}), '
+                      f'{math.hypot(x - goal[0], y - goal[1]):.2f} m from goal', flush=True)
+                next_print += 15
+        self.spin_for(0.5)
+        err, detail = self._final_error(goal, t0)
+        self.report('teleop resumed mission SUCCEEDED', k is not None and err < 0.5, detail)
+
     def _mask_near(self, cx, cy, radius):
         """Number of 100-cells of the latest keepout mask within `radius` of (cx, cy), and the total of 100-cells."""
         m = self.mask
@@ -453,10 +560,11 @@ class Checker(Node):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('steps', nargs='+', choices=['rates', 'drive', 'camera', 'nav', 'through', 'keepout', 'map',
-                                              'hmi_goal', 'hmi_path', 'hmi_pause', 'hmi_keepout', 'hmi_map'])
+                                              'hmi_goal', 'hmi_path', 'hmi_pause', 'hmi_keepout', 'hmi_map', 'teleop'])
     parser.add_argument('--goal', nargs=2, type=float, action='append', default=[])
     parser.add_argument('--zone', nargs=3, type=float, help='keepout square: center x, center y, half size')
     parser.add_argument('--map-name', default='live_check', help='map name for hmi_map')
+    parser.add_argument('--no-wait-goal', action='store_true', help='teleop: CANCEL instead of waiting for SUCCEEDED')
     parser.add_argument('--save', help='image path for camera/map')
     args = parser.parse_args()
     rclpy.init()
@@ -488,6 +596,8 @@ def main():
                 node.check_hmi_keepout(*args.zone)
             elif step == 'hmi_map':
                 node.check_hmi_map(args.map_name)
+            elif step == 'teleop':
+                node.check_teleop(args.goal, wait_goal=not args.no_wait_goal)
     finally:
         node.cmd_pub.publish(Twist())
         node.destroy_node()

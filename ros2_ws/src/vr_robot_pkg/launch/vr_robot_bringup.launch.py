@@ -1,5 +1,6 @@
 """Bringup for the Pioneer P3-DX digital twin: CoppeliaSim bridge, mission supervisor
-(missions, keepout filter mask, saved maps), slam_toolbox, Nav2 and ROS-TCP-Endpoint (Unity).
+(missions, keepout filter mask, saved maps), twist_mux (Unity teleop overrides Nav2),
+slam_toolbox, Nav2 and ROS-TCP-Endpoint (Unity).
 
 Examples:
     ros2 launch vr_robot_pkg vr_robot_bringup.launch.py
@@ -22,6 +23,7 @@ def generate_launch_description():
     pkg_share = FindPackageShare('vr_robot_pkg')
     nav2_params = PathJoinSubstitution([pkg_share, 'config', 'nav2_params_jazzy.yaml'])
     slam_params = PathJoinSubstitution([pkg_share, 'config', 'mapper_params_online_async.yaml'])
+    twist_mux_params = PathJoinSubstitution([pkg_share, 'config', 'twist_mux.yaml'])
     rviz_config = PathJoinSubstitution([pkg_share, 'config', 'vr_robot.rviz'])
 
     mock_mode = LaunchConfiguration('mock_mode')
@@ -127,6 +129,19 @@ def generate_launch_description():
         condition=IfCondition(use_nav2),
     )
 
+    # Muxes Nav2 (cmd_vel_nav_safe, priority 10) and Unity teleop (cmd_vel_teleop, priority 100)
+    # into /cmd_vel. Always started: teleop must work with use_nav2:=false.
+    twist_mux = Node(
+        package='twist_mux',
+        executable='twist_mux',
+        name='twist_mux',
+        output='screen',
+        parameters=[twist_mux_params],
+        remappings=[('cmd_vel_out', '/cmd_vel')],
+    )
+
+    # ROS-TCP-Endpoint sometimes exits ([Errno 9] Bad file descriptor) when Unity leaves Play
+    # mode; respawn keeps teleop sessions alive.
     tcp_endpoint = Node(
         package='ros_tcp_endpoint',
         executable='default_server_endpoint',
@@ -134,6 +149,8 @@ def generate_launch_description():
         output='screen',
         parameters=[{'ROS_IP': '0.0.0.0', 'ROS_TCP_PORT': tcp_port}],
         condition=IfCondition(use_tcp_endpoint),
+        respawn=True,
+        respawn_delay=2.0,
     )
 
     rviz = Node(
@@ -146,5 +163,5 @@ def generate_launch_description():
 
     return LaunchDescription(args + [
         bridge, supervisor, filter_info_server, filter_lifecycle,
-        slam, nav2, tcp_endpoint, rviz,
+        twist_mux, slam, nav2, tcp_endpoint, rviz,
     ])

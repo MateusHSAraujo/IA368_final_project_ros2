@@ -383,7 +383,7 @@ def expected_stroke_mask(strokes, dilation=0.21):
 def test_initial_state(make_h):
     h = make_h()
     s = h.mission[-1]
-    assert set(s) == {'state', 'mode', 'remaining', 'message'}
+    assert set(s) == {'state', 'mode', 'remaining', 'message', 'teleop'}
     assert (s['state'], s['mode'], s['remaining']) == ('IDLE', None, 0)
     m = h.map_states[-1]
     assert m['state'] == 'READY' and m['map'] is None and m['maps'] == []
@@ -541,6 +541,21 @@ def test_teleop_auto_pause(make_h):
     h.teleop(0.2)
     s = h.wait_state('PAUSED')
     assert 'teleop' in s['message']
+    assert s['teleop'] is True
+
+
+def test_teleop_flag_idle_and_expiry(make_h):
+    h = make_h(params=['teleop_active_timeout:=0.3'])
+    h.wait_state('IDLE')
+    assert h.mission[-1]['teleop'] is False
+    h.teleop(0.0, 0.0)          # a zero command does not set the flag
+    h.spin_for(0.4)
+    assert all(s['teleop'] is False for s in h.mission)
+    h.teleop(0.2)
+    assert h.wait_mission(lambda s: s['teleop'] is True)
+    assert h.mission[-1]['state'] == 'IDLE'
+    assert h.wait_mission(lambda s: s['teleop'] is False, 3.0)
+    assert h.mission[-1]['state'] == 'IDLE'
 
 
 # ---------------------------------------------------------------------- 11

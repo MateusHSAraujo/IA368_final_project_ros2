@@ -105,8 +105,10 @@ def parse_mission_cmd(text):
     return cmd if cmd in COMMANDS else None
 
 
-def mission_state_json(state, mode=None, remaining=0, message=''):
-    """JSON string with exactly the keys state, mode, remaining, message (in that order).
+def mission_state_json(state, mode=None, remaining=0, message='', teleop=False):
+    """JSON string with exactly the keys state, mode, remaining, message, teleop (in that order).
+
+    teleop is True while the operator is driving manually (recent /cmd_vel_teleop).
 
     state must be in STATES and mode None, 'goal' or 'path' (ValueError otherwise).
     """
@@ -119,4 +121,5 @@ def mission_state_json(state, mode=None, remaining=0, message=''):
         'mode': mode,
         'remaining': int(remaining),
         'message': str(message),
+        'teleop': bool(teleop),
     })

@@ -149,16 +149,26 @@ def test_parse_mission_cmd_unknown_and_empty():
 def test_mission_state_json_round_trip_and_key_order():
     text = ml.mission_state_json(ml.NAVIGATING, mode=ml.MODE_PATH, remaining=3.0,
                                  message='on way')
-    assert list(json.loads(text).keys()) == ['state', 'mode', 'remaining', 'message']
+    assert list(json.loads(text).keys()) == ['state', 'mode', 'remaining', 'message',
+                                             'teleop']
     assert json.loads(text) == {'state': 'NAVIGATING', 'mode': 'path',
-                                'remaining': 3, 'message': 'on way'}
+                                'remaining': 3, 'message': 'on way',
+                                'teleop': False}
     assert text.index('"state"') < text.index('"mode"') < text.index('"remaining"') \
-        < text.index('"message"')
+        < text.index('"message"') < text.index('"teleop"')
+
+
+def test_mission_state_json_teleop_flag():
+    on = json.loads(ml.mission_state_json(ml.IDLE, teleop=True))
+    off = json.loads(ml.mission_state_json(ml.IDLE, teleop=False))
+    assert on['teleop'] is True and off['teleop'] is False
+    assert list(on.keys())[-1] == 'teleop'
 
 
 def test_mission_state_json_defaults_and_null_mode():
     data = json.loads(ml.mission_state_json(ml.IDLE))
-    assert data == {'state': 'IDLE', 'mode': None, 'remaining': 0, 'message': ''}
+    assert data == {'state': 'IDLE', 'mode': None, 'remaining': 0, 'message': '',
+                    'teleop': False}
 
 
 def test_mission_state_json_invalid_state():

@@ -7,8 +7,9 @@ You are the **WSL agent (Claude Code on WSL2, Ubuntu 24.04)**. This repository (
 - `PROJECT_PROPOSAL.md`: overview.
 - `STAGE1_UNITY_PLAN.md`: what the Windows agent built in Stage 1 (CoppeliaSim → Unity converter) and its status.
 - `STAGE4_VR_LOCOMOTION_PLAN.md`: what the Windows agent built in Stage 4 part 1 (VR locomotion, VR menu, start flow) and its status. Not needed for the ROS work.
+- `STAGE5_TACTICAL_TABLE_PLAN.md`: what the Windows agent built for the Stage 4 Spatial Menu and the Stage 5 Unity side (operations panel, goal / path / no-go tools, Mission and Map pages) and its status, including the Unity-side use of `/hmi/map` and `/hmi/keepout_mask`.
 
-These four files are **symlinks into `windows_workspace/`** (the Windows repository `IA368_final_project`, mounted at `/mnt/c/Users/mateu/unicamp/IA368/projeto_final`). There is a single copy of each document: if you edit them, the change lands in the Windows repository. Do not commit the Windows repository from WSL (Git over `/mnt/c` is slow and mixes line endings/permissions); tell the user which documents you changed so they are committed on Windows.
+These five files are **symlinks into `windows_workspace/`** (the Windows repository `IA368_final_project`, mounted at `/mnt/c/Users/mateu/unicamp/IA368/projeto_final`). There is a single copy of each document: if you edit them, the change lands in the Windows repository. Do not commit the Windows repository from WSL (Git over `/mnt/c` is slow and mixes line endings/permissions); tell the user which documents you changed so they are committed on Windows.
 
 ## Language
 Everything committed is in **English**: code, comments, log strings, documentation, file and folder names, and commit messages.
@@ -41,7 +42,9 @@ Everything committed is in **English**: code, comments, log strings, documentati
 
 ## Status
 - Stages 2 and 3 done (2026-11-13), validated live against `scene_house.ttt`. Contract for Stages 5–6: `ros2_ws/src/vr_robot_pkg/README.md`.
-- Stage 5 ROS side done (2026-11-14): `mission_supervisor_node` (the only node Unity talks to: `/hmi/goal`, `/hmi/path`, `/hmi/mission_cmd`, `/hmi/keepout_stroke`, `/hmi/map_cmd` → `/hmi/mission_state`, `/hmi/map_state`), replacing `keepout_mask_node`. Saved maps in `maps/` (reference `scene_house`); `map:=scene_house` loads it at startup. Next on this side: twist_mux (Stage 6, `sudo apt install ros-jazzy-twist-mux`).
+- Stage 5 ROS side done (2026-11-14): `mission_supervisor_node` (the only node Unity talks to: `/hmi/goal`, `/hmi/path`, `/hmi/mission_cmd`, `/hmi/keepout_stroke`, `/hmi/map_cmd` → `/hmi/mission_state`, `/hmi/map_state`), replacing `keepout_mask_node`. Saved maps in `maps/` (reference `scene_house`); `map:=scene_house` loads it at startup. Volatile `/hmi/map` and `/hmi/keepout_mask` for Unity (2026-11-15, `3e1e3b8`). Stage 5 Unity side done on Windows (2026-11-15).
+- Stage 6 ROS side done (2026-11-16): `twist_mux` muxes Nav2 (`cmd_vel_nav_safe`, priority 10) and `/cmd_vel_teleop` (priority 100, bypasses collision_monitor and keepout) into `/cmd_vel`; `/hmi/mission_state` gains `teleop`; ROS-TCP-Endpoint respawns. Validated live against `scene_house.ttt`; 219 offline tests. Contract: `ros2_ws/src/vr_robot_pkg/README.md`.
+- Next: Unity side of Stage 6 (Windows agent).
 - `scene_house.ttt` was saved on Windows (2026-11-13) with `/myRobot`, `/myRobot/frontCamera`, respondable house shapes, real-time mode and the depth-camera laser v2.  On 2026-11-14 the unused sweep-laser parts (`LaserScannerBody_2D`, joint, proximity sensor, graph) were removed in memory; `/myRobot/LaserScanner_2D` (invisible, holds the laser script with `remoteExchange`), `Laserscanner_ref` and the two depth sensors stay. Scene changes made through the Remote API live only in memory until the user saves the scene in CoppeliaSim.
 
 ## ROS-side practical lessons
@@ -55,6 +58,8 @@ Everything committed is in **English**: code, comments, log strings, documentati
 - rclpy raises `ValueError` if one logging call site is used with two severities (e.g. `(log.info if ok else log.warning)(msg)`): that kills the node at the second call. Use separate call sites.
 - Nav2's bt_navigator aborts a goal on one action (NavigateToPose vs NavigateThroughPoses) while the other is running, and a cancel ends a pending goal on the same action too: send a new goal only after the old one's result has arrived (the supervisor does this).
 - Saved maps: slam_toolbox `serialize_map`/`deserialize_map` (START_AT_GIVEN_POSE at the odom pose) work in async mode; ground-truth odom makes the saved map frame the world frame. slam_toolbox runs with `use_scan_matching: false` and `do_loop_closing: false` (a bad match during a long exploration had shifted `map -> odom` by 2.2 m / 19°); keep them off so `map` == world == Unity. `/slam_toolbox/save_map` fails (its map_saver times out on `/map`): `map_store.write_map_image` writes the PGM/YAML instead.
+- A fresh rclpy node needs ~2-3 s of DDS discovery on the full stack before it receives `/myRobot/odom`: wait for the first message, never a fixed sleep.
+- `twist_mux` reads its topics from parameters under its node name: renaming it (`-r __node:=...`) with the stock YAML (key `twist_mux:`) leaves it with no inputs.
 
 ## Verification
 `colcon build --symlink-install` in `ros2_ws`, `pytest tests/` (offline, incl. the bridge in mock mode), mock action servers for Nav2 actions, and the live checks above when CoppeliaSim is available. ROS 2 Jazzy: `source /opt/ros/jazzy/setup.bash`.
