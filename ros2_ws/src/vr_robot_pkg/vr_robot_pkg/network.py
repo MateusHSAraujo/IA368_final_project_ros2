@@ -4,8 +4,9 @@ This module mirrors ``scripts/get_windows_host_ip.sh`` in pure Python (stdlib
 only, no ROS imports). Resolution order:
 
 1. ``COPPELIA_HOST`` environment variable (manual override).
-2. ``127.0.0.1`` when WSL runs in mirrored networking mode.
-3. The default gateway of the WSL network (NAT mode), read from
+2. ``127.0.0.1`` outside WSL (native Linux: CoppeliaSim runs on the same machine).
+3. ``127.0.0.1`` when WSL runs in mirrored networking mode.
+4. The default gateway of the WSL network (NAT mode), read from
    ``/proc/net/route``: this is the Windows host.
 """
 
@@ -15,6 +16,7 @@ import subprocess
 from typing import Mapping, Optional
 
 _ROUTE_FILE = '/proc/net/route'
+_VERSION_FILE = '/proc/version'
 
 
 def parse_default_gateway(proc_net_route_text: str) -> Optional[str]:
@@ -37,6 +39,19 @@ def parse_default_gateway(proc_net_route_text: str) -> Optional[str]:
     return None
 
 
+def is_wsl_kernel(proc_version_text: str) -> bool:
+    """Return True if the text of /proc/version names a WSL (Microsoft) kernel."""
+    return 'microsoft' in proc_version_text.lower()
+
+
+def _running_in_wsl() -> bool:
+    try:
+        with open(_VERSION_FILE, 'r', encoding='utf-8') as version_file:
+            return is_wsl_kernel(version_file.read())
+    except OSError:
+        return False
+
+
 def _networking_mode() -> str:
     try:
         result = subprocess.run(
@@ -48,12 +63,14 @@ def _networking_mode() -> str:
 
 
 def detect_windows_host_ip(env: Optional[Mapping[str, str]] = None) -> Optional[str]:
-    """Return the Windows host IPv4 as seen from WSL2, or None if unknown."""
+    """Return the CoppeliaSim host IPv4 (the Windows host from WSL2), or None if unknown."""
     if env is None:
         env = os.environ
     override = env.get('COPPELIA_HOST')
     if override:
         return override
+    if not _running_in_wsl():
+        return '127.0.0.1'
     if _networking_mode() == 'mirrored':
         return '127.0.0.1'
     try:

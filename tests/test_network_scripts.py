@@ -89,6 +89,17 @@ def test_detect_override():
 
 
 @needs_wsl
+def test_is_wsl_kernel():
+    assert network.is_wsl_kernel('Linux version 6.6.87.2-microsoft-standard-WSL2 (gcc ...)')
+    assert not network.is_wsl_kernel('Linux version 6.8.0-49-generic (buildd@lcy02-amd64)')
+
+
+def test_detect_native_linux(monkeypatch):
+    monkeypatch.setattr(network, '_running_in_wsl', lambda: False)
+    assert network.detect_windows_host_ip(env={}) == '127.0.0.1'
+    assert network.detect_windows_host_ip(env={'COPPELIA_HOST': '10.0.0.5'}) == '10.0.0.5'
+
+
 def test_detect_matches_script():
     result = run_script(clear_host=True)
     assert result.returncode == 0, result.stderr

@@ -45,7 +45,7 @@ def generate_launch_description():
         DeclareLaunchArgument('mock_mode', default_value='false',
                               description='Simulate the robot in-process instead of CoppeliaSim'),
         DeclareLaunchArgument('coppelia_host', default_value='',
-                              description='CoppeliaSim host; empty = detect the Windows host'),
+                              description='CoppeliaSim host; empty = detect it (Windows host from WSL, 127.0.0.1 on native Linux)'),
         DeclareLaunchArgument('camera_enabled', default_value='false',
                               description='Stream the front camera from the start (/camera/enable toggles it)'),
         DeclareLaunchArgument('coppelia_display', default_value='false',

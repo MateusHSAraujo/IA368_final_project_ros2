@@ -68,7 +68,7 @@ Without `remoteExchange` the bridge falls back to individual calls (a few Hz).
 | Argument | Default | Meaning |
 |---|---|---|
 | `mock_mode` | `false` | In-process simulated robot. |
-| `coppelia_host` | `''` | CoppeliaSim host. Empty = auto-detect (WSL default gateway); also env `COPPELIA_HOST`. |
+| `coppelia_host` | `''` | CoppeliaSim host. Empty = auto-detect (WSL: default gateway, or 127.0.0.1 in mirrored mode; native Linux: 127.0.0.1); also env `COPPELIA_HOST`. |
 | `camera_enabled` | `false` | Camera streaming at start (normally toggled by `/camera/enable`). |
 | `coppelia_display` | `false` | Keep CoppeliaSim window rendering on. |
 | `use_slam` | `true` | slam_toolbox. |
@@ -176,7 +176,7 @@ slam_toolbox's own `/slam_toolbox/save_map` service fails in this setup (its map
 |---|---|
 | Unity Editor (Windows) | ROS IP `127.0.0.1`, port `10000`; reaches WSL through WSL2 localhost forwarding (verified with `Test-NetConnection`). |
 | Quest 3 (USB) | Run `scripts/setup_adb_reverse.ps1` on Windows (adb reverse tcp 10000, 23005, 23006). The APK also uses `127.0.0.1:10000`. `-PortProxy` (admin) adds a netsh portproxy if localhost forwarding fails. Mirrored to the Windows repo `scripts/` by `scripts/sync_to_windows.sh`. |
-| ROS side -> CoppeliaSim | Windows host port 23000 (auto-detected as the WSL default gateway; `scripts/get_windows_host_ip.sh`). |
+| ROS side -> CoppeliaSim | Windows host port 23000 (auto-detected as the WSL default gateway, or 127.0.0.1 on native Linux; `scripts/get_windows_host_ip.sh`). |
 
 ROS-TCP-Connector handshake: endpoint v0.7.0, protocol ROS2.
 

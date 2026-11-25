@@ -4,8 +4,9 @@
 #
 # Resolution order:
 #   1. $COPPELIA_HOST, if set (manual override).
-#   2. 127.0.0.1 when WSL runs in mirrored networking mode (Windows and WSL share localhost).
-#   3. The default gateway of the WSL network (NAT mode): this is the Windows host.
+#   2. 127.0.0.1 outside WSL (native Linux: CoppeliaSim runs on the same machine).
+#   3. 127.0.0.1 when WSL runs in mirrored networking mode (Windows and WSL share localhost).
+#   4. The default gateway of the WSL network (NAT mode): this is the Windows host.
 #
 # Usage:
 #   get_windows_host_ip.sh                 # print the IP
@@ -17,7 +18,7 @@
 set -euo pipefail
 
 usage() {
-    sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 is_ipv4() {
@@ -27,6 +28,10 @@ is_ipv4() {
 detect_host_ip() {
     if [[ -n "${COPPELIA_HOST:-}" ]]; then
         echo "${COPPELIA_HOST}"
+        return 0
+    fi
+    if ! grep -qi microsoft /proc/version 2>/dev/null; then
+        echo "127.0.0.1"
         return 0
     fi
     if command -v wslinfo >/dev/null 2>&1; then
