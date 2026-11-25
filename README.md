@@ -20,18 +20,14 @@ The system runs on a Digital Twin architecture split into two decoupled layers:
 | Repository | Machine | Contents |
 |---|---|---|
 | **`IA368_final_project_ros2`** (this one) | WSL2, `/home/mateus/ia368/projeto_final` | ROS 2 workspace, ROS-side tests, Linux scripts |
-| [`IA368_final_project`](https://github.com/MateusHSAraujo/IA368_final_project) | Windows, `C:\Users\mateu\unicamp\IA368\projeto_final` | Unity project, CoppeliaSim scripts and scenes, **planning documents** |
+| [`IA368_final_project`](https://github.com/MateusHSAraujo/IA368_final_project) | Windows, `C:\Users\mateu\unicamp\IA368\projeto_final` | Unity project, CoppeliaSim scripts and scenes |
 
-The Windows folder is reachable from here through the `windows_workspace` symlink (not versioned). The planning documents at the root of this repository are symlinks into it, so there is a single copy: changes made through them belong to the Windows repository.
+The Windows folder is reachable from here through the `windows_workspace` symlink (not versioned).
 
 ## Repository structure
 
 ```text
 ├── CLAUDE.md                # Instructions for the WSL agent (Claude Code)
-├── PROJECT_PROPOSAL.md      -> windows_workspace/PROJECT_PROPOSAL.md     (symlink)
-├── IMPLEMENTATION_PLAN.md   -> windows_workspace/IMPLEMENTATION_PLAN.md  (symlink)
-├── STAGE1_UNITY_PLAN.md     -> windows_workspace/STAGE1_UNITY_PLAN.md    (symlink)
-├── STAGE4_VR_LOCOMOTION_PLAN.md -> windows_workspace/STAGE4_VR_LOCOMOTION_PLAN.md (symlink)
 ├── ros2_ws/src/
 │   ├── vr_robot_pkg/        # Bridge, mission supervisor, configs, bringup launch; README = ROS interface contract
 │   └── ROS-TCP-Endpoint/    # git submodule (Unity-Technologies, main-ros2)
@@ -57,7 +53,3 @@ ros2 launch vr_robot_pkg vr_robot_bringup.launch.py map:=scene_house  # same, st
 ros2 launch vr_robot_pkg vr_robot_bringup.launch.py mock_mode:=true   # without CoppeliaSim
 cd .. && pytest tests/
 ```
-
-For architecture details, network topology and the stage plan, see:
-* [Project Proposal](PROJECT_PROPOSAL.md)
-* [Implementation Plan](IMPLEMENTATION_PLAN.md)

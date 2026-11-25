@@ -1,21 +1,12 @@
 # IA368 — Final Project, ROS 2 side (WSL2)
 
-You are the **WSL agent (Claude Code on WSL2, Ubuntu 24.04)**. This repository (`IA368_final_project_ros2`, `git@github.com:MateusHSAraujo/IA368_final_project_ros2.git`) holds the ROS 2 side of the project: ROS 2 Jazzy, Nav2, slam_toolbox, the CoppeliaSim–ROS 2 bridge and the mission supervisor (Stages 2, 3, 5 and 6 of the plan).
-
-## Read first
-- `IMPLEMENTATION_PLAN.md`: stage-by-stage plan. Section 2.4 lists the open architecture items for Stages 3–6 (e.g. ROS-TCP-Connector is not an Action client; Nav2 has no native Pause/Resume; the Keepout Filter needs `costmap_filter_info_server` and a `transient_local` mask).
-- `PROJECT_PROPOSAL.md`: overview.
-- `STAGE1_UNITY_PLAN.md`: what the Windows agent built in Stage 1 (CoppeliaSim → Unity converter) and its status.
-- `STAGE4_VR_LOCOMOTION_PLAN.md`: what the Windows agent built in Stage 4 part 1 (VR locomotion, VR menu, start flow) and its status. Not needed for the ROS work.
-- `STAGE5_TACTICAL_TABLE_PLAN.md`: what the Windows agent built for the Stage 4 Spatial Menu and the Stage 5 Unity side (operations panel, goal / path / no-go tools, Mission and Map pages) and its status, including the Unity-side use of `/hmi/map` and `/hmi/keepout_mask`.
-
-These five files are **symlinks into `windows_workspace/`** (the Windows repository `IA368_final_project`, mounted at `/mnt/c/Users/mateu/unicamp/IA368/projeto_final`). There is a single copy of each document: if you edit them, the change lands in the Windows repository. Do not commit the Windows repository from WSL (Git over `/mnt/c` is slow and mixes line endings/permissions); tell the user which documents you changed so they are committed on Windows.
+You are the **WSL agent (Claude Code on WSL2, Ubuntu 24.04)**. This repository (`IA368_final_project_ros2`, `git@github.com:MateusHSAraujo/IA368_final_project_ros2.git`) holds the ROS 2 side of the project: ROS 2 Jazzy, Nav2, slam_toolbox, the CoppeliaSim–ROS 2 bridge and the mission supervisor (Stages 2, 3, 5 and 6 of the project). All stages are done; the planning documents were removed after the project ended (they remain in the Git history of both repositories).
 
 ## Language
 Everything committed is in **English**: code, comments, log strings, documentation, file and folder names, and commit messages.
 
 ## Division of work
-- **Windows agent (Claude Code on Windows)**, repo `IA368_final_project`: Unity project (`My project/`), CoppeliaSim scripts (`coppelia_scripts/`), scenes (`scene_house/*.ttt`), PowerShell scripts and the planning documents. Stage 1 is done.
+- **Windows agent (Claude Code on Windows)**, repo `IA368_final_project`: Unity project (`My project/`), CoppeliaSim scripts (`coppelia_scripts/`), scenes (`scene_house/*.ttt`), and PowerShell scripts. Stage 1 is done.
 - **You (WSL)**: `ros2_ws/`, `tests/`, `scripts/*.sh` (and `scripts/*.ps1` authored here, mirrored to Windows by `scripts/sync_to_windows.sh`).
 - `sync_to_windows.sh` copies **only** `scripts/*.ps1`. Never copy documents, C#, Lua or scenes to Windows: Windows is their master copy.
 
