@@ -151,7 +151,7 @@ Example `message` values: `goal reached`, `paused (operator)`, `paused (teleop)`
 
 | Topic | Type | Direction | Contract |
 |---|---|---|---|
-| `/cmd_vel_teleop` | `geometry_msgs/Twist` | Unity -> `twist_mux` | Manual driving, priority 100 (above Nav2). >= 10 Hz while the deadman (grip) is held; one zero Twist on release. Unity clamps `\|linear.x\|` <= 0.5 m/s and `\|angular.z\|` <= 1.5 rad/s itself (no ROS-side clamp). Unity never publishes `/cmd_vel`. |
+| `/cmd_vel_teleop` | `geometry_msgs/Twist` | Unity -> `twist_mux` | Manual driving, priority 100 (above Nav2). >= 10 Hz while a stick is deflected (no grip deadman: the spring-centred sticks are the deadman, left stick Y = linear.x, right stick X = angular.z); one zero Twist when both sticks return to the centre or teleop closes. Unity clamps `\|linear.x\|` <= 0.5 m/s and `\|angular.z\|` <= 1.5 rad/s itself (no ROS-side clamp). Unity never publishes `/cmd_vel`. |
 
 Routing: `controller` -> `cmd_vel_nav` -> `velocity_smoother` -> `cmd_vel_smoothed` -> `collision_monitor` -> `cmd_vel_nav_safe` -> `twist_mux` -> `/cmd_vel` -> `coppelia_bridge`. Teleop bypasses `collision_monitor` and the keepout zones (full manual authority for rescue).
 
